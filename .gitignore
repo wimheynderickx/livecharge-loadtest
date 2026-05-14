@@ -1,0 +1,5 @@
+# Claude Code local settings
+.claude/settings.local.json
+
+# Superpowers brainstorm artifacts
+.superpowers/
