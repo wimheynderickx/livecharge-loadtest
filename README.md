@@ -1,7 +1,6 @@
 # Operational Manual — Livecharge OCS LoadTest
-
-**Binary:** `loadtest`  
-**Version:** see `loadtest version`
+  
+**Version:** 0.1
 
 ---
 
