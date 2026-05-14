@@ -6,7 +6,7 @@
 
 This tool is used by Channel Technologies for testing their Livecharge product range, an OCS (Online Charging System) and Billing Suite.
 
-**Channel Systems** is a software vendor located in The Netherlands, specialized in carrier-grade software for MNO, MVNE, MVNE and IoT service providers.
+**Channel Systems** is a software vendor located in The Netherlands, specialized in carrier-grade software for MNO, MVNE, MVNO and IoT service providers.
 Check out https://channel.tech/ for more information about their product portfolio, such as **LiveCharge** (Rating, Billing and Charging), **LiveCore** (CRM and BSS) and **LiveCom** (Voice AI applications)
 
 ## Main features
