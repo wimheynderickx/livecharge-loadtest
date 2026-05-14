@@ -1,0 +1,59 @@
+# Mock HTTP/2 over TLS server (h2 via ALPN). Requires loadtest 0.2+.
+#
+# Clients reach this listener via `https://` URLs; ALPN negotiates
+# HTTP/2 automatically. Default scenario form:
+#
+#   [transport]
+#   type = "http"
+#   url  = "https://localhost:8443"
+#
+#   [transport.tls]
+#   insecure_skip_verify = true   # required for the auto-generated cert
+#
+# The auto-generated cert covers localhost / 127.0.0.1 / ::1 / loadtest-mock
+# and is valid 24 hours. Override with cert_file + key_file when you
+# need a stable / pinned cert.
+#
+# The [transport.http2] block tunes the same four knobs as h2c-mock.toml.
+#
+# Usage: loadtest mock --config mock/h2-mock.toml
+
+[transport]
+type = "http"
+url  = "localhost:8443"
+
+[transport.auth]
+type = "none"
+
+[transport.tls]
+enabled   = true
+# cert_file = "/path/to/cert.pem"   # optional — pair with key_file
+# key_file  = "/path/to/key.pem"    # optional — pair with cert_file
+
+[transport.http2]
+max_concurrent_streams      = 100
+initial_stream_window_size  = 65535
+initial_conn_window_size    = 1048576
+max_frame_size              = 16384
+
+[[endpoint]]
+path           = "/v1/charges"
+method         = "POST"
+fail_rate      = 0.05
+no_answer_rate = 0.02
+ok_response    = """{ "id": "CHG-{{.extracted.amount}}", "status": "created" }"""
+fail_response  = """{ "error": "insufficient_funds" }"""
+
+  [[endpoint.extract]]
+  field = "amount"
+  path  = "amount"
+
+# Streaming endpoint — same shape as in h2c-mock.toml, served over h2/TLS.
+[[endpoint]]
+path        = "/v1/stream"
+method      = "GET"
+ok_response = """{ "tick": 0 }\n{ "tick": 1 }\n{ "tick": 2 }\n{ "tick": 3 }\n"""
+
+  [endpoint.stream]
+  chunks   = 4
+  delay_ms = 25

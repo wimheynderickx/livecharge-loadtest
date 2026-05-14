@@ -1,0 +1,39 @@
+# Mock HTTPS server (TLS + HTTP/1.1). Requires loadtest 0.2+ — earlier
+# releases do not implement [transport].tls or the cert fields below.
+#
+# By default the mock generates a self-signed cert+key in memory at
+# startup. Clients hitting this listener must set
+#
+#   [transport.tls]
+#   insecure_skip_verify = true
+#
+# in the scenario, because the cert is unsigned and rotates every run.
+#
+# Override with your own cert+key by uncommenting cert_file and key_file
+# below. Both must be set together; either alone is a config error.
+#
+# Usage: loadtest mock --config mock/https-mock.toml
+
+[transport]
+type = "http"
+url  = "localhost:8443"
+
+[transport.auth]
+type = "none"
+
+[transport.tls]
+enabled   = true
+# cert_file = "/path/to/cert.pem"   # optional — pair with key_file
+# key_file  = "/path/to/key.pem"    # optional — pair with cert_file
+
+[[endpoint]]
+path           = "/v1/charges"
+method         = "POST"
+fail_rate      = 0.05
+no_answer_rate = 0.02
+ok_response    = """{ "id": "CHG-{{.extracted.amount}}", "status": "created" }"""
+fail_response  = """{ "error": "insufficient_funds" }"""
+
+  [[endpoint.extract]]
+  field = "amount"
+  path  = "amount"
