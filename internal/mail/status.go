@@ -13,6 +13,10 @@ const (
 	// StateDisabled means the email feature is off for this scenario.
 	// The TUI hides the email row entirely.
 	StateDisabled State = iota
+	// StateConfigured — email is on and validated, but no send has fired
+	// yet. The TUI shows the configured triggers + interval so the user
+	// can see what's wired up before any lifecycle event happens.
+	StateConfigured
 	// StatePending — goroutine spawned, dialogue not yet finished.
 	StatePending
 	// StateSent — server accepted the message.
@@ -27,6 +31,8 @@ func (s State) String() string {
 	switch s {
 	case StateDisabled:
 		return "disabled"
+	case StateConfigured:
+		return "configured"
 	case StatePending:
 		return "pending"
 	case StateSent:
@@ -58,6 +64,12 @@ type Status struct {
 	// TUI so the user always knows which event the displayed status
 	// belongs to (since several can occur for the same scenario).
 	trigger string
+	// triggers and reportInterval capture the resolved email config so
+	// the TUI can show "what's wired up" alongside the latest send
+	// state. Populated once by MarkConfigured at wiring time and stable
+	// for the run.
+	triggers       []string
+	reportInterval time.Duration
 }
 
 // State returns the current state.
@@ -70,25 +82,33 @@ func (s *Status) State() State {
 // Snapshot returns a read-consistent view of the entire status. Caller may
 // retain the result indefinitely without affecting future writes.
 type Snapshot struct {
-	State     State
-	Err       error
-	StartAt   time.Time
-	FinishAt  time.Time
-	Recipient string
-	Trigger   string
+	State          State
+	Err            error
+	StartAt        time.Time
+	FinishAt       time.Time
+	Recipient      string
+	Trigger        string
+	Triggers       []string
+	ReportInterval time.Duration
 }
 
 // Snapshot returns the current values as a frozen struct.
 func (s *Status) Snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	var triggers []string
+	if len(s.triggers) > 0 {
+		triggers = append([]string(nil), s.triggers...)
+	}
 	return Snapshot{
-		State:     s.state,
-		Err:       s.err,
-		StartAt:   s.startAt,
-		FinishAt:  s.finishAt,
-		Recipient: s.recipient,
-		Trigger:   s.trigger,
+		State:          s.state,
+		Err:            s.err,
+		StartAt:        s.startAt,
+		FinishAt:       s.finishAt,
+		Recipient:      s.recipient,
+		Trigger:        s.trigger,
+		Triggers:       triggers,
+		ReportInterval: s.reportInterval,
 	}
 }
 
@@ -136,6 +156,19 @@ func (s *Status) MarkDisabled() {
 	s.state = StateDisabled
 }
 
+// MarkConfigured records the resolved trigger list and progress cadence
+// and moves the status out of Disabled. Called once at wiring time so
+// the TUI can show "email is on; here's what fires" before any send.
+// The reportInterval is only meaningful when "progress" is in triggers;
+// callers may pass zero otherwise.
+func (s *Status) MarkConfigured(triggers []string, reportInterval time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.state = StateConfigured
+	s.triggers = append(s.triggers[:0], triggers...)
+	s.reportInterval = reportInterval
+}
+
 // Summary returns a one-line description suitable for the TUI footer.
 // Includes the trigger reason in parentheses when known so the user can
 // tell a "progress" email apart from a "done" email at a glance.
@@ -148,6 +181,8 @@ func (s *Status) Summary() string {
 	switch snap.State {
 	case StateDisabled:
 		return ""
+	case StateConfigured:
+		return "configured" + suffix
 	case StatePending:
 		return fmt.Sprintf("sending%s to %s…", suffix, snap.Recipient)
 	case StateSent:

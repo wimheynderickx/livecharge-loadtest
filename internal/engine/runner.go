@@ -287,6 +287,14 @@ func (r *Runner) startInternal(resume bool) error {
 	// Background watcher: when all workers exit AND the collector has
 	// drained, settle the final state. This is the single source of truth
 	// for DONE.
+	//
+	// Causality matters here: we fire the terminal callback BEFORE
+	// closing doneCh so callers waiting on DoneCh() see fully-settled
+	// state — including any synchronous work the callback did
+	// (template render + SendAsync registration). Tests + the headless
+	// runner rely on this: when the loop sees doneCh closed, the email
+	// pipeline has already registered its in-flight sends with the
+	// mailRegistry, so WaitAll() finds them.
 	go func() {
 		r.generator.Wait()
 		r.stopCollectorOnce.Do(r.collector.Stop)
@@ -297,20 +305,29 @@ func (r *Runner) startInternal(resume bool) error {
 		var terminal State = -1
 		if r.state == StateRunning {
 			r.state = StateDone
-			close(r.doneCh)
 			terminal = StateDone
 		}
 		cb := r.onTerminal
+		doneCh := r.doneCh
 		r.mu.Unlock()
 
-		// Fire the lifecycle callback once we're outside the lock so a
-		// slow handler can't deadlock the runner. We only fire on DONE
+		// Fire the lifecycle callback outside the lock so a slow
+		// handler can't deadlock the runner. We only fire on DONE
 		// here; ERROR transitions live in the worker error path (added
 		// alongside this hook). External STOP intentionally does NOT
 		// fire the callback because the user already knows the run
 		// ended — they pressed 's'.
 		if cb != nil && terminal != -1 {
 			cb(terminal)
+		}
+
+		// Signal DONE last so anyone waiting on the channel sees a
+		// fully-settled state (callback has run, registered any async
+		// work). Only close it if we actually transitioned — an
+		// external Stop has already left the channel for the next
+		// lifecycle to recreate.
+		if terminal != -1 {
+			close(doneCh)
 		}
 	}()
 

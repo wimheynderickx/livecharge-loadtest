@@ -714,6 +714,13 @@ Set credentials in a shared `mail-config.toml`, the recipient list in the
 scenario, and override the subject on the command line for a one-off run.
 Each layer is optional; you can configure everything in any one of them.
 
+**Exception — `report_interval`:** progress-mail cadence is inherently
+scenario-specific (a soak test wants minutes between progress mails, a
+smoke test wants seconds), so the scenario's `report_interval` wins over
+the shared `mail-config.toml`. The file value only fills in when the
+scenario didn't set one. CLI still wins over both, as for every other
+field. This is the only field with inverted precedence.
+
 The SMTP password also reads from the `LOADTEST_SMTP_PASS` environment
 variable when no `smtp_pass` or `--mail-smtp-pass` is set — handy for CI.
 
@@ -763,9 +770,9 @@ existing configs keep their behaviour. Any combination is allowed:
 | Trigger | Fires when… | Notes |
 | --- | --- | --- |
 | `start` | The scenario transitions IDLE → RUNNING from a fresh `Start()` or `Restart()`. | **Not** fired on `Resume()` (the scenario continues a prior run). The email reports `state = RUNNING`, sent and received counters at 0, no latency yet. |
-| `progress` | Every `report_interval` while the scenario is RUNNING. | Requires `report_interval > 0`. The ticker pauses during STOPPED state and resumes on Resume. **Cancelled the moment the scenario reaches DONE or ERROR** — a run that finishes before the next tick gets no stale progress email. |
-| `done` | The scenario reaches its `total_messages` / `duration` limit. | Fired once. |
-| `error` | The scenario terminates with a fatal transport failure. | Fired once. Mutually exclusive with `done` for a given run. |
+| `progress` | First fire at `min(report_interval, 5s)` after start so short scenarios get at least one progress email; subsequent fires every `report_interval` while the scenario is RUNNING. | Requires `report_interval > 0`. The ticker pauses during STOPPED state and resumes on Resume. **Cancelled the moment the scenario reaches a terminal state** — a run that finishes between ticks gets no stale progress email after its done/error mail. |
+| `done` | The scenario reaches its `total_messages` / `duration` limit **with mostly-successful results**. | Fired once. |
+| `error` | The scenario reaches its limit but errors dominate (errors > received). | Fired once. Mutually exclusive with `done` for a given run — the email feature classifies the final outcome based on the snapshot. |
 
 **`report_interval`** is required when `progress` is in `on`; the
 loaded config is rejected at startup otherwise. A 5-minute cadence is
@@ -784,6 +791,24 @@ The built-in HTML template renders a coloured banner per trigger; the
 built-in text template prints a `=== Sent because: <trigger> ===`
 header so the recipient never has to guess which event the mail is
 about.
+
+#### 8.2.2 Overview-tab indicator
+
+When the email feature is on, the Overview tab shows a two-line summary
+under the latency block so you can see *what's wired up* without
+opening the scenario file:
+
+```text
+EMAIL  on: start, progress (every 10s), done, error
+         📧 sent (progress) to ops@example.com at 14:22:35
+```
+
+The first line lists the active triggers and the resolved progress
+cadence (handy when `--mail-config` overrides — or, for `report_interval`
+specifically, *doesn't* override — the scenario value). The
+most-recently-fired trigger is highlighted so the status line below
+always reads in context. The status line appears only after the first
+send fires.
 
 ### 8.3 `mail-config.toml` (shared file)
 

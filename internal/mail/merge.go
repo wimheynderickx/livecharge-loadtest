@@ -61,6 +61,11 @@ type Overrides struct {
 // Per-field merging is deliberate: a user can put credentials in a shared
 // file and pass --mail-subject on the command line without losing the rest.
 //
+// Exception: report_interval. Progress-mail cadence is scenario-specific
+// (soak vs smoke tests want very different intervals), so the scenario's
+// report_interval wins over the file. The file only fills in when the
+// scenario didn't set one. CLI still wins over both, as for every field.
+//
 // Side effects: ApplyDefaults runs on the final result so callers don't
 // have to remember it.
 func Merge(scenarioBlock, fileConfig Config, overrides Overrides) Config {
@@ -98,7 +103,13 @@ func mergeFromFile(dst *Config, src Config) {
 	if src.SendTimeout.Duration > 0 {
 		dst.SendTimeout = src.SendTimeout
 	}
-	if src.ReportInterval.Duration > 0 {
+	// report_interval is the one field where the scenario block wins over
+	// the mail-config file: progress cadence is scenario-specific (a soak
+	// test wants minutes, a smoke test wants seconds) and the shared file
+	// only acts as a fallback when the scenario didn't set one. Every
+	// other field follows the documented "mail-config overrides scenario"
+	// rule.
+	if src.ReportInterval.Duration > 0 && dst.ReportInterval.Duration == 0 {
 		dst.ReportInterval = src.ReportInterval
 	}
 	if src.SMTPHost != "" {
