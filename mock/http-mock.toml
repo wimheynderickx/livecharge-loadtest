@@ -1,0 +1,25 @@
+# Mock HTTP server that pairs with scenarios/http-basic-auth.toml.
+#
+# Listens on POST /v1/charges and replies with a created-charge JSON body
+# (5% of replies return an "insufficient_funds" failure).
+#
+# Usage: loadtest mock --config mock/http-mock.toml
+
+[transport]
+type = "http"
+url  = "localhost:8080"
+
+[transport.auth]
+type = "none"
+
+[[endpoint]]
+path           = "/v1/charges"
+method         = "POST"
+fail_rate      = 0.05   # 5% of replies are FAIL bodies
+no_answer_rate = 0.02   # 2% of requests get no reply at all (client times out)
+ok_response    = """{ "id": "CHG-{{.extracted.amount}}", "status": "created" }"""
+fail_response  = """{ "error": "insufficient_funds" }"""
+
+  [[endpoint.extract]]
+  field = "amount"
+  path  = "amount"

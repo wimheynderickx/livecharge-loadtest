@@ -1,48 +1,59 @@
 # Repository Layout
 
-This document explains what every directory and file in the `ocs-loadtest` repository is for,
-and how the pieces fit together. It is intended for developers who are new to the project or
-new to Go.
+This document explains what every directory and file in the `loadtest`
+repository is for, and how the pieces fit together. It is intended for
+developers who are new to the project or new to Go.
 
 ---
 
 ## Top-Level Overview
 
 ```
-ocs-loadtest/
-├── cmd/                    ← runnable programs (there is only one: the CLI)
-├── internal/               ← all application logic, not importable from outside this module
-├── scenarios/              ← example TOML configuration files you can use as a starting point
+sequana2-perf-test/
+├── cmd/                    ← runnable programs (just one: the CLI)
+├── internal/               ← application logic, not importable from outside this module
+├── scenarios/              ← example scenario / suite TOML files
+├── mock/                   ← example mock-server TOML files
 ├── docs/                   ← documentation (you are here)
-├── Dockerfile              ← builds a Docker image for deployment
-└── go.mod                  ← Go module definition; lists direct dependencies
+├── mail-config.toml        ← optional shared email config (gitignored)
+├── Makefile                ← build / test / run shortcuts
+├── Dockerfile              ← container build
+└── go.mod                  ← Go module definition (module name: livecharge/loadtest)
 ```
 
-In Go, `internal/` is a special directory name. The Go compiler enforces that packages inside
-`internal/` can only be imported by code within the same module. This is intentional: it means
-the packages here are **implementation details**, not a public API. If you ever want to make
-the engine importable by other Go projects (e.g. for the future Maven/Java integration), you
-would rename `internal/` to `pkg/`.
+The Go compiler treats `internal/` specially: packages inside `internal/`
+can only be imported by code within the same module. This makes them
+implementation details rather than a public API.
 
 ---
 
-## `cmd/ocs-loadtest/`
+## `cmd/loadtest/`
 
 ```
-cmd/ocs-loadtest/
-└── main.go
+cmd/loadtest/
+├── main.go         ← cobra root command, registers all sub-commands
+├── run.go          ← `loadtest run` — runs scenarios with optional TUI
+├── email.go        ← --mail-* flags, OnTerminal wiring, send orchestration
+├── validate.go     ← `loadtest validate` — parse-only TOML check, CI-friendly
+├── mock.go         ← `loadtest mock` — runs the mock NATS / HTTP server
+├── help.go         ← `loadtest help` — curated overview vs. cobra's auto-help
+├── manualcmd.go    ← `loadtest manual` — renders the embedded manual
+└── version.go      ← `loadtest version`
 ```
 
-**What it is:** The entry point of the program. When you run `go build ./cmd/ocs-loadtest`
-you get the `ocs-loadtest` binary.
+**What it is:** The entry point. When you build `./cmd/loadtest` you get
+the `loadtest` binary.
 
-**What it does:** It wires all the internal packages together and hands control to the CLI
-framework (Cobra). `main.go` is intentionally thin — it creates the root command, registers
-sub-commands (`run`, `validate`, `mock`, `version`), and calls `Execute()`. All real logic
-lives in `internal/`.
+**What it does:** Wires the internal packages together and dispatches via
+Cobra. Each `*.go` file in this directory holds one sub-command; the
+files are intentionally thin — every non-trivial routine lives in
+`internal/`.
 
-**What it does NOT do:** It contains no business logic. If you find yourself writing anything
-more complex than flag parsing and dependency wiring here, it belongs in `internal/` instead.
+`run.go` does the most: it loads scenarios, resolves the explicit /
+implicit split for `--auto-start`, optionally loads `--mail-config`,
+builds the mail registry, and hands off to either `runTUI` or
+`runHeadless`. `email.go` carries the email feature's CLI flags and the
+per-scenario lifecycle wiring (template context, async send, status).
 
 ---
 
@@ -50,25 +61,33 @@ more complex than flag parsing and dependency wiring here, it belongs in `intern
 
 ```
 internal/config/
-├── config.go       ← top-level Config, ScenarioConfig, SuiteConfig structs
+├── config.go       ← top-level structs: ScenarioConfig, SuiteConfig, etc.
 ├── context.go      ← ContextValueConfig (static, sequence, random_range, random_pick)
-├── load.go         ← LoadConfig (rate, concurrency, timeout, duration)
+├── duration.go     ← TOML-friendly Duration wrapper around time.Duration
+├── load.go         ← LoadConfig (rate, concurrency, response_timeout, duration)
+├── load_files.go   ← LoadScenario / LoadSuite — TOML parsing entry points
+├── mock.go         ← MockConfig, MockEndpointConfig (incl. fail_rate, no_answer_rate)
 ├── step.go         ← StepConfig, ExtractConfig, PredicateConfig, HeaderConfig
-├── mock.go         ← MockConfig, MockEndpointConfig
-└── validate.go     ← cross-field validation logic (e.g. histogram_max cannot exceed timeout)
+├── transport.go    ← TransportConfig + AuthConfig (none / userpass / basic / jwt)
+├── validate.go     ← cross-field validation
+└── doc.go          ← package overview
 ```
 
-**What it is:** TOML parsing and validation. This package reads `.toml` files from disk and
-turns them into typed Go structs that the rest of the application uses.
+**What it is:** TOML parsing and validation. Reads `.toml` files from
+disk and turns them into typed Go structs.
 
-**Why a separate package:** Keeping config parsing isolated means the rest of the application
-never reads files directly. It depends only on the structs defined here. This makes testing
-easy — you can construct a `ScenarioConfig` in a test without touching the filesystem.
+**Why a separate package:** Isolating config parsing means the rest of
+the application never touches the filesystem. Tests can build a
+`ScenarioConfig` in memory.
 
 **Key types:**
-- `ScenarioConfig` — everything in a scenario TOML file
-- `SuiteConfig` — a suite TOML file that references multiple scenario files
-- `StepConfig` — one `[[step]]` block, including its headers, extractions, and predicates
+
+- `ScenarioConfig` — everything in one scenario TOML, including the
+  optional `[email]` block (typed as `*mail.Config`) and the `[report]`
+  block for CSV output
+- `SuiteConfig` — a suite file referencing multiple scenario files
+- `StepConfig` — one `[[step]]` with its headers, extracts, predicates
+- `MetricsConfig` — percentiles, `bucket_count` or `bucket_edges_ms`
 
 ---
 
@@ -76,30 +95,39 @@ easy — you can construct a `ScenarioConfig` in a test without touching the fil
 
 ```
 internal/engine/
-├── engine.go           ← ScenarioRunner interface and State type
-├── runner.go           ← ScenarioRunner implementation: Start/Stop/Resume/Restart
-├── session.go          ← one Session: executes the step loop for a single virtual user
-├── load_generator.go   ← token-bucket rate limiter + goroutine pool management
-└── precalc.go          ← detects and pre-renders fully static templates at startup
+├── engine.go             ← ScenarioRunner interface + State enum
+├── runner.go             ← Runner: Start/Stop/Resume/Restart + OnTerminal callback
+├── session.go            ← one Session: executes the step loop for a virtual user
+├── load_generator.go     ← token-bucket rate limiter + goroutine pool
+├── precalc.go            ← pre-renders fully static templates at startup
+├── transport_factory.go  ← builds the right transport from TransportConfig
+├── runner_test.go        ← lifecycle tests (start/stop/resume/restart races)
+└── doc.go
 ```
 
-**What it is:** The core execution engine. This is where load testing actually happens.
+**What it is:** The core execution engine. Load testing happens here.
 
-**How it works at a high level:**
+**Lifecycle (per scenario):**
 
-1. `ScenarioRunner` is created from a `ScenarioConfig`. It owns a `LoadGenerator` and a
-   `MetricsCollector`.
-2. `LoadGenerator` maintains a pool of `concurrency` goroutines. Each goroutine runs one
-   `Session` at a time and immediately starts a new one when the previous session ends.
-3. A `Session` steps through the `[[step]]` list: render template → send via transport →
-   extract fields from reply → evaluate predicates → pick next step → repeat.
-4. After each step, the session sends a `StepResult` to the `MetricsCollector`.
+1. `NewRunner(loaded)` allocates the transport, ContextFactory, Collector,
+   and LoadGenerator from the config.
+2. `Start()` spawns the goroutine pool. Each goroutine runs one Session
+   at a time and immediately starts the next on completion.
+3. A `Session` walks the `[[step]]` list: render template → send via
+   transport → extract → evaluate predicates → pick next step.
+4. After each step, the session submits a `StepResult` to the Collector.
+5. A background watcher transitions the runner to `DONE` (on
+   `total_messages` / `duration` reached) or `ERROR` (fatal transport
+   failure). It fires `OnTerminal(state)` once after the final metrics
+   are settled — used by `cmd/loadtest/email.go` to dispatch the
+   post-run email.
 
-**Lifecycle methods on `ScenarioRunner`:**
-- `Start()` — allocates the goroutine pool and begins sending
-- `Stop()` — signals the pool to drain in-flight sessions, then waits; banks elapsed time
-- `Resume()` — restarts the pool from the banked state (keeps counters and metrics)
-- `Restart()` — resets everything and calls `Start()` fresh
+**Two-context split for clean shutdown:** `sessionCtx` covers in-flight
+sessions; `acceptCtx` is what workers consult to decide whether to take
+on new work. Natural completion cancels only `acceptCtx` so existing
+sessions can finish; external `Stop()` cancels both. This is why a
+loadtest that hits its `total_messages` limit doesn't print spurious
+`context canceled` errors for in-flight requests.
 
 ---
 
@@ -107,16 +135,18 @@ internal/engine/
 
 ```
 internal/transport/
-├── transport.go    ← Transport interface, Request and Response types
+├── transport.go    ← Transport interface, Request / Response types
+├── doc.go
 ├── nats/
-│   └── nats.go     ← NATS implementation of Transport
+│   └── nats.go     ← NATS implementation
 └── http/
-    └── http.go     ← HTTP/HTTPS implementation of Transport
+    └── http.go     ← HTTP / HTTPS implementation
 ```
 
-**What it is:** The network layer. Everything that touches the wire lives here.
+**What it is:** The network layer. The only place anything touches the
+wire.
 
-**The central abstraction:**
+**Central interface:**
 
 ```go
 type Transport interface {
@@ -125,20 +155,14 @@ type Transport interface {
 }
 ```
 
-The engine only knows about `Transport`. It does not know whether it is talking to NATS or
-HTTP. This means you can add a new protocol (e.g. gRPC, Kafka) by adding a new subdirectory
-here without touching any other package.
+The engine knows about `Transport` only — adding a new protocol means
+adding a sub-package, no changes elsewhere.
 
-**`transport/nats/`** — wraps the `nats.go` client library. Supports:
-- Request/reply using `nats.Conn.RequestMsgWithContext` (built-in inbox reply subject)
-- Fire-and-forget using `nats.Conn.PublishMsg` (no reply expected)
-- NATS message headers (`nats.Msg.Header`) for both outgoing and incoming messages
-- Auth: plain (no credentials) and username/password
-
-**`transport/http/`** — wraps the standard `net/http` package. Supports:
-- A shared `http.Client` with connection pooling (one client per scenario, reused across
-  all concurrent sessions — important for performance)
-- Auth: none, HTTP Basic, and JWT Bearer token
+- **`transport/nats/`** — wraps the `nats.go` client. Request/reply
+  via `RequestMsgWithContext`, fire-and-forget via `PublishMsg`, headers
+  on both directions, auth: none / userpass.
+- **`transport/http/`** — wraps `net/http`. One shared `http.Client`
+  per scenario with connection pooling. Auth: none / Basic / JWT Bearer.
 
 ---
 
@@ -146,28 +170,29 @@ here without touching any other package.
 
 ```
 internal/template/
-├── resolver.go     ← ContextFactory: builds and snapshots the .ctx namespace per session
-├── renderer.go     ← wraps Go text/template; renders a template string with a Context
-└── extractor.go    ← JSON-path extraction from response bodies, headers, and NATS metadata
+├── resolver.go     ← ContextFactory: builds .ctx per session
+├── renderer.go     ← wraps text/template; renders with a Context
+├── extractor.go    ← JSON-path / header / status extraction from replies
+├── precalc.go      ← pre-render detection for fully static templates
+├── predicate.go    ← predicate evaluation against extracted session values
+└── doc.go
 ```
 
-**What it is:** Everything related to template rendering and value resolution.
+**What it is:** Template rendering, context resolution, and reply
+post-processing.
 
-**The three concerns:**
+**Three concerns:**
 
-1. **Context factory (`resolver.go`)** — reads the `[context]` block from TOML and creates
-   generators. For each new session, `Snapshot()` is called to produce an initial `.ctx` map:
-   - Static values are copied as-is
-   - `sequence` generators increment a global atomic counter (safe for concurrent sessions)
-   - `random_range` and `random_pick` produce a new random value per session
-
-2. **Renderer (`renderer.go`)** — takes a Go `text/template` string and a `Context`
-   (holding both `.ctx` and `.session`) and returns rendered JSON bytes. Wraps
-   `text/template.Execute` with error context so failures are easy to diagnose.
-
-3. **Extractor (`extractor.go`)** — given a `Response` and a path like `response/chargeRef`
-   or `header/X-Charge-Id`, navigates the parsed JSON or header map and returns the string
-   value. Stores it in the session's `.session` map for use in subsequent step templates.
+1. **ContextFactory (`resolver.go`)** — reads `[context]` from TOML and
+   builds generators. `Snapshot()` produces the `.ctx` map for a new
+   session: static values copied as-is; `sequence` generators increment
+   a global atomic counter; `random_range` / `random_pick` produce a
+   fresh value per session.
+2. **Renderer (`renderer.go`)** — Go `text/template` wrapper with
+   diagnostic context on failure.
+3. **Extractor (`extractor.go`)** — path navigation (`response/field`,
+   `header/Name`, `status`, `meta/Header`) to populate `.session` for
+   subsequent steps.
 
 ---
 
@@ -175,25 +200,73 @@ internal/template/
 
 ```
 internal/metrics/
-├── collector.go    ← MetricsCollector: receives StepResult events, updates all stats
-├── histogram.go    ← HDR histogram wrapper (one per scenario, one per predicate)
-├── snapshot.go     ← Snapshot type: a point-in-time read-consistent view of all stats
-└── throughput.go   ← sliding 1-second window for current msg/sec calculation
+├── collector.go     ← Collector: receives StepResult, updates all stats; log ring
+├── histogram.go     ← HDR histogram wrapper (microsecond resolution)
+├── buckets.go       ← bucket layout: auto from bucket_count OR manual edges
+├── throughput.go    ← sliding 1-second window for current msg/sec
+├── snapshot.go      ← Snapshot: point-in-time read-consistent view
+├── collector_test.go
+├── buckets_test.go
+├── throughput_test.go
+└── doc.go
 ```
 
-**What it is:** All statistics collection. Nothing here talks to the network or renders UI.
+**What it is:** All statistics collection. Nothing here touches the
+network or renders UI.
 
-**Why HDR histograms:** A standard average hides the tail. HDR (High Dynamic Range) histograms
-track the full distribution of latencies with high precision and low memory usage. The library
-used is `github.com/HdrHistogram/hdrhistogram-go`.
+**HDR histograms** record latencies in **microseconds** so
+sub-millisecond values (e.g. `p50 = 0.135 ms`) display faithfully.
+`buckets.go` lays out the histogram tab: either `bucket_count` evenly
+spaced edges (75% finer-grained over the first half of the range), or
+fully manual `bucket_edges_ms`.
 
-**Key design:** The `MetricsCollector` is the only writer; all other packages only call
-`Snapshot()` which returns a read-consistent copy. This avoids lock contention between the
-engine (high-frequency writer) and the TUI (250 ms reader).
+**Throughput** keeps a 10×100 ms sliding window and tracks both the
+current rate, the peak ever seen (`MaxMsgPerSec`), and the lifetime
+average (`AvgMsgPerSec`). All three appear on the Overview tab.
 
-**Per-predicate histograms:** When a predicate matches, the step's latency is recorded into
-that predicate's histogram in addition to the global one. This lets you see, for example,
-that `happy-flow` latency is 12 ms while `error-flow` latency is 8 ms.
+**Log ring buffer:** in addition to the existing `LogCh`, the Collector
+keeps a bounded slice of recent log lines (`LogTail(n)`). This lets the
+email subsystem snapshot the scenario's log to attach to a run-summary
+email without competing with the TUI for the channel.
+
+---
+
+## `internal/mail/`
+
+```
+internal/mail/
+├── config.go              ← Config + TOML tags, Validate, FiresOn, ApplyDefaults
+├── merge.go               ← LoadFile + Merge: scenario [email] → mail-config → CLI
+├── template.go            ← TemplateContext, RenderText, RenderSubjectWithFallback
+├── default_template.go    ← embedded plain-text default body template
+├── sender.go              ← SMTP send (STARTTLS + PLAIN/LOGIN, port 587 by default)
+├── status.go              ← thread-safe Status (Disabled / Pending / Sent / Failed)
+├── config_test.go
+├── merge_test.go
+├── template_test.go
+├── sender_test.go         ← uses github.com/mhale/smtpd as in-process mock SMTP
+└── doc.go
+```
+
+**What it is:** Optional post-run email notification feature. Wired in
+`cmd/loadtest/email.go`; the runner fires `OnTerminal` after reaching a
+terminal state, the callback renders a `TemplateContext` from the
+final `Snapshot`, and `Sender.SendAsync` dispatches in a goroutine. The
+TUI polls `*Status` each tick to render the email row on the Overview
+tab.
+
+**Three-layer config merge** (later overrides earlier, per-field):
+
+1. Scenario file `[email]` block
+2. `--mail-config <file>` shared TOML
+3. Individual `--mail-*` CLI flags
+
+`LOADTEST_SMTP_PASS` env var fills `smtp_pass` when nothing else did.
+
+**Failure handling:** template / validation / SMTP errors are recorded
+on the `Status` and surfaced in the TUI rather than crashing the run.
+A bad `--mail-config` path warns on stderr and marks every scenario
+that wanted email as `Failed` so the user always sees the cause.
 
 ---
 
@@ -201,38 +274,52 @@ that `happy-flow` latency is 12 ms while `error-flow` latency is 8 ms.
 
 ```
 internal/tui/
-├── app.go          ← root Bubble Tea model: wires sidebar + detail panel + header
-├── sidebar.go      ← scenario list with state badges and action buttons
-├── tabs.go         ← tab bar and tab switching logic
-├── overview.go     ← Tab 1: KPI boxes, latency percentile list, progress bar
-├── latency.go      ← Tab 2: HDR histogram rendered as ASCII bar chart
-├── predicates.go   ← Tab 3: predicate accounting table
-├── log.go          ← Tab 4: scrolling error/event log
-└── styles.go       ← Lip Gloss colour and layout constants
+├── app.go         ← root Bubble Tea model: messages, modals, keyboard routing
+├── types.go       ← Config, ManagedScenario, ScenarioCandidate, MailStatusProvider
+├── sidebar.go     ← scenario list (auto-windowed scroll) + suite totals block
+├── tabs.go        ← tab bar
+├── detail.go      ← right pane: tab dispatcher
+├── overview.go    ← Tab 1: scenario header, KPI rows, percentile list, progress, email row
+├── latency.go     ← Tab 2: HDR histogram as ASCII bars (uses bucket layout)
+├── predicates.go  ← Tab 3: predicate accounting table
+├── log.go         ← Tab 4: scrolling log buffer
+├── picker.go      ← modal: 'a' add-scenario picker (list of candidates)
+├── confirm.go     ← modal: 'x' yes/no confirmation
+├── filebrowser.go ← modal: 'b' filesystem .toml picker (wraps bubbles/filepicker)
+├── manual.go      ← modal: 'm' manual viewer + pager for `loadtest manual`
+├── styles.go      ← Lip Gloss colour and layout constants
+└── doc.go
 ```
 
-**What it is:** The terminal user interface. Built with Bubble Tea, a Go TUI framework that
-uses an Elm-style architecture: `Model → Update(msg) → View()`.
+**What it is:** The terminal dashboard, built with Bubble Tea
+(Elm-style architecture: `Model → Update(msg) → View()`).
 
-**Layout:** Split pane. Left sidebar (220 columns wide) lists all scenarios with their
-current state and action buttons. The right panel shows tabs for the selected scenario:
-Overview, Latency histogram, Predicates table, and Log.
+**Layout:** Header bar (navy with "Livecharge OCS" in light blue +
+"LoadTest" in white). Sidebar listing scenarios with status, sent /
+rate / p99 — auto-windowed so the list scrolls when there are too many
+scenarios to fit. Bottom of sidebar shows aggregated totals (numbers
+in amber-yellow). Right panel: tabs (Overview / Latency / Predicates /
+Log). Footer bar with active key hints.
 
-**Update loop:** A `ticker` fires every 250 ms and triggers a call to `Snapshot()` on all
-active `ScenarioRunner` instances. The model stores the snapshots and Bubble Tea re-renders
-the view. This keeps the TUI decoupled from the engine — the engine never calls into the TUI.
+**Modal precedence** (only one open at a time): manual > picker >
+confirm > browser.
 
-**Keyboard shortcuts** (defined in `app.go`):
+**Keyboard shortcuts:**
 
 | Key | Action |
-|-----|--------|
-| `↑` / `↓` | Move scenario selection in sidebar |
-| `1`–`4` | Switch tab in detail panel |
-| `s` | Stop selected scenario |
-| `r` | Resume selected scenario |
-| `R` (shift) | Restart selected scenario |
-| `Space` | Start selected scenario (if IDLE) |
-| `q` | Quit — stops all running scenarios gracefully |
+| --- | --- |
+| `↑` / `↓` | Move scenario selection |
+| `1`–`4` | Switch detail tab |
+| `Space` | Start scenario (if IDLE) |
+| `s` / `r` / `R` | Stop / Resume / Restart |
+| `a` | Add scenario (picker over `--config-dirs`) |
+| `x` | Remove scenario (with confirm) |
+| `b` | Filesystem browser for any `.toml` |
+| `m` | Open the embedded operational manual |
+| `q` | Quit (drains in-flight emails up to 60 s) |
+
+The TUI never imports the engine's mutators — it reads `Snapshot()` and
+`mail.Status` only, via callbacks installed at startup.
 
 ---
 
@@ -240,20 +327,18 @@ the view. This keeps the TUI decoupled from the engine — the engine never call
 
 ```
 internal/report/
-└── csv.go     ← CSVWriter: opens file, writes header row, appends stat rows on a ticker
+├── csv.go     ← CSVWriter: header row + periodic appended snapshots
+└── doc.go
 ```
 
-**What it is:** Optional CSV export of periodic statistics snapshots.
+**What it is:** Optional CSV export.
 
-**How it works:** If `[report] csv_path` is set in the scenario TOML, a `CSVWriter` is
-created when the scenario starts. Every `flush_interval` (default `10s`) it calls
-`Snapshot()` on the `MetricsCollector` and appends one row to the file. The file is kept
-open for the lifetime of the scenario so writes are buffered efficiently. It is closed
-cleanly on `Stop()` or when the scenario completes.
-
-**CSV columns:** timestamp, scenario name, messages sent/received/errors, msg/sec, and one
-column per configured percentile (e.g. `p50_ms`, `p95_ms`, `p99_ms`). Predicate counts are
-appended as additional columns named `predicate_<name>_count`.
+**How it works:** When `[report] csv_path` is set, a `CSVWriter` is
+started with the scenario. Every `flush_interval` it calls `Snapshot()`
+and appends a row. Percentile columns are emitted as **float
+milliseconds** (e.g. `0.135`) so sub-millisecond resolution survives
+into the CSV. The `{timestamp}` placeholder in `csv_path` is resolved
+once at file open so each run produces a uniquely-named file.
 
 ---
 
@@ -261,69 +346,107 @@ appended as additional columns named `predicate_<name>_count`.
 
 ```
 internal/mockserver/
-├── server.go       ← MockServer: starts NATS subscriber or HTTP listener from MockConfig
-├── handler.go      ← per-endpoint request handler: extract → pick ok/fail → render reply
-└── extractor.go    ← reuses internal/template extractor for incoming request JSON
+├── server.go       ← MockServer: NATS subscriber or HTTP listener
+├── handler.go      ← per-endpoint: extract → pick ok/fail/no-answer → render reply
+└── doc.go
 ```
 
-**What it is:** A minimal test double for OCS components. Used to validate the load tool
-itself without needing a real OCS system.
+**What it is:** A minimal test double for OCS-style components.
 
-**What it does:** For each `[[mock.endpoint]]` in the mock TOML file:
-- Subscribes to a NATS subject **or** registers an HTTP path
-- When a message arrives, extracts configured JSON fields from the body
-- Randomly selects `ok_response` or `fail_response` based on `fail_rate`
-- Renders the selected template with `{{.extracted.X}}` values and sends the reply
+**Per `[[mock.endpoint]]`:**
 
-**What it does NOT do:** It does not validate, authenticate, persist state, or do anything
-else. It is intentionally minimal. Its only job is to reply fast enough for load testing.
+1. Subscribe to a NATS subject **or** register an HTTP path
+2. On request, optionally extract JSON fields from the body
+3. Roll the dice on `fail_rate` (fail) and `no_answer_rate` (silent
+   timeout — NATS skips Respond, HTTP blocks until the client gives up)
+4. Render the chosen `ok_response` / `fail_response` template and reply
 
 ---
 
-## `scenarios/`
+## `internal/manual/`
 
-Example TOML files that demonstrate common patterns:
+```
+internal/manual/
+├── embed.go      ← //go:embed manual.md + glamour rendering helpers
+└── manual.md     ← the operational manual (this is what `loadtest manual` shows)
+```
 
-| File | Demonstrates |
-|------|-------------|
-| `scenarios/nats-single-step.toml` | One-shot NATS request/reply with no session state |
-| `scenarios/nats-session.toml` | Multi-step NATS session with context extraction |
-| `scenarios/http-basic-auth.toml` | HTTP POST with Basic auth |
-| `scenarios/http-jwt.toml` | HTTP with JWT Bearer token |
-| `scenarios/fire-and-forget.toml` | NATS fire-and-forget (no reply expected) |
-| `scenarios/suite-example.toml` | Suite file referencing multiple scenario files |
-| `mock/nats-mock.toml` | Mock server config matching `nats-session.toml` |
-| `mock/http-mock.toml` | Mock server config matching `http-basic-auth.toml` |
+**What it is:** The operational manual, embedded into the binary at
+build time. `loadtest manual` opens it in an interactive viewport (or
+prints raw markdown with `--raw`). The TUI's `m` key opens the same
+content as an in-dashboard modal.
+
+---
+
+## `scenarios/` and `mock/`
+
+```
+scenarios/
+├── nats-single-step.toml                       single-step NATS request/reply
+├── nats-session.toml                            multi-step NATS with extracts
+├── fire-and-forget.toml                         NATS publish, no reply
+├── http-basic-auth.toml                         HTTP + Basic auth
+├── http-basic-auth-manual-buckets.toml          + custom histogram edges
+├── http-basic-auth-manual-buckets-multistep.toml  3-step HTTP session
+├── http-basic-auth-with-mail.toml               + post-run email via [email] block
+├── http-jwt.toml                                HTTP + JWT Bearer token
+└── suite-example.toml                           suite referencing multiple scenarios
+
+mock/
+├── nats-mock.toml                               matches the NATS scenarios
+├── http-mock.toml                               matches the HTTP scenarios (with fail/no-answer)
+└── http-mock-noerrors.toml                      same, but always ok
+```
+
+---
+
+## Top-level files
+
+| File | Purpose |
+| --- | --- |
+| `mail-config.toml` | Example shared `--mail-config` file. **Gitignored** because real ones hold SMTP credentials. |
+| `Dockerfile` | Multi-stage build of the `loadtest` binary. |
+| `Makefile` | Convenience targets (`make build`, `make test`, `make run`). |
+| `go.mod` / `go.sum` | Module is `livecharge/loadtest`. Direct deps: BurntSushi/toml, hdrhistogram-go, charmbracelet/{bubbletea,bubbles,lipgloss,glamour}, nats.go, cobra, mhale/smtpd. |
 
 ---
 
 ## `docs/`
 
 | File | Contents |
-|------|----------|
-| `docs/repository-layout.md` | This file — what is where and why |
-| `docs/operational-manual.md` | How to install, configure, and run the tool |
-| `docs/superpowers/specs/2026-05-13-ocs-loadtest-design.md` | Full design specification |
+| --- | --- |
+| `docs/repository-layout.md` | This file — what is where and why. |
+| `docs/superpowers/specs/...` | Design specifications (gitignored). |
+
+The operational manual lives at `internal/manual/manual.md` (embedded
+into the binary). It is the user-facing documentation; this file is the
+developer-facing map.
 
 ---
 
 ## How the Packages Connect
 
 ```
-main.go
+cmd/loadtest/  (main, run, email, validate, mock, help, manualcmd, version)
   │
-  ├── config/          reads TOML files → typed structs
+  ├── config/          parses TOML → typed structs (incl. *mail.Config)
   │
-  ├── engine/          orchestrates sessions
-  │     ├── template/  renders templates + manages context
-  │     ├── transport/ sends/receives over NATS or HTTP
-  │     └── metrics/   records latency + counters
+  ├── engine/          orchestrates sessions, fires OnTerminal
+  │    ├── template/   renders templates + manages context + extracts
+  │    ├── transport/  sends/receives over NATS or HTTP
+  │    └── metrics/    records latency, counters, throughput, log ring
   │
-  ├── tui/             renders the dashboard (reads metrics via Snapshot)
-  ├── report/          writes CSV (reads metrics via Snapshot)
-  └── mockserver/      standalone mock (uses template/extractor)
+  ├── mail/            renders email body + sends async, depends only on metrics types
+  │
+  ├── tui/             dashboard (reads metrics.Snapshot + mail.Status only)
+  ├── report/          CSV writer (reads metrics.Snapshot only)
+  ├── mockserver/      mock NATS / HTTP server (uses template extractor)
+  └── manual/          embedded operational manual (used by `loadtest manual` + TUI `m`)
 ```
 
-The dependency arrows only point **downward and inward**. The TUI never imports the engine;
-it only reads `metrics.Snapshot`. The engine never imports the TUI. This makes each package
-independently testable and replaceable.
+Dependency arrows point downward and inward. The TUI never imports the
+engine's mutators; it only reads `Snapshot()` and `*mail.Status`. The
+engine knows about transports through an interface and fires
+`OnTerminal` to a caller-supplied callback — that's how `cmd/loadtest`
+plugs in the email feature without the engine importing `internal/mail`.
+This keeps every package independently testable and replaceable.

@@ -1,0 +1,37 @@
+[scenario]
+name        = "nats-single-step"
+description = "Single NATS request/reply, no extraction or predicates."
+
+[transport]
+type = "nats"
+url  = "nats://localhost:4222"
+
+[transport.auth]
+type = "none"
+
+[context]
+terminalId = "TERM-001"
+
+[context.chargeId]
+type  = "sequence"
+start = 1000
+step  = 1
+
+[load]
+rate             = 100
+total_messages   = 1000
+concurrency      = 10
+response_timeout = "2s"
+
+[metrics]
+percentiles = [50, 90, 95, 99]
+
+[[step]]
+name     = "send-charge"
+subject  = "ocs.charge"
+template = """
+{
+  "terminalId": "{{.ctx.terminalId}}",
+  "chargeId":   {{.ctx.chargeId}}
+}
+"""

@@ -1,0 +1,228 @@
+{{/*
+HTML body template for the post-run email.
+
+Usage — in your scenario [email] block OR in mail-config.toml:
+
+  # Option A: HTML only (no text fallback)
+  template_file_html = "mail-templates/mail-default.html.tmpl"
+
+  # Option B: HTML *plus* a text fallback (recommended).
+  # Loadtest sends multipart/alternative; rich clients show the HTML,
+  # plain-text readers see the text version.
+  template_file_html = "mail-templates/mail-default.html.tmpl"
+  template_file      = "mail-templates/mail-default.txt.tmpl"   # or omit to keep the built-in text default
+
+All placeholders are documented in §8.5 of the operational manual.
+Styling uses inline CSS because most webmail clients (Gmail, Outlook
+Web, etc.) strip <style> tags and reject external stylesheets.
+*/ -}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{.Scenario.Name}} — {{.State}}</title>
+</head>
+<body style="margin:0; padding:24px; background:#f3f4f6; font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif; color:#111827; -webkit-font-smoothing:antialiased;">
+
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center" width="720" style="max-width:720px; width:100%; background:#ffffff; border:1px solid #e5e7eb; border-radius:8px; overflow:hidden;">
+
+  <!-- ===== Top brand bar ===== -->
+  <tr>
+    <td style="background:#1E3A8A; padding:18px 28px;">
+      <div style="font-size:13px; letter-spacing:.5px; color:#93C5FD; text-transform:uppercase;">Livecharge OCS</div>
+      <div style="font-size:22px; font-weight:600; color:#ffffff; margin-top:2px;">LoadTest Run Summary</div>
+    </td>
+  </tr>
+
+  <!-- ===== Trigger reason banner ===== -->
+  <tr>
+    <td style="padding:0;">
+      {{- if eq .Trigger "start"}}
+        <div style="background:#DBEAFE; color:#1E3A8A; padding:10px 28px; font-size:13px; font-weight:600; letter-spacing:.4px; text-transform:uppercase;">▶ Scenario started</div>
+      {{- else if eq .Trigger "progress"}}
+        <div style="background:#FEF3C7; color:#92400E; padding:10px 28px; font-size:13px; font-weight:600; letter-spacing:.4px; text-transform:uppercase;">⧖ Progress update</div>
+      {{- else if eq .Trigger "done"}}
+        <div style="background:#DCFCE7; color:#166534; padding:10px 28px; font-size:13px; font-weight:600; letter-spacing:.4px; text-transform:uppercase;">✓ Scenario completed</div>
+      {{- else if eq .Trigger "error"}}
+        <div style="background:#FEE2E2; color:#991B1B; padding:10px 28px; font-size:13px; font-weight:600; letter-spacing:.4px; text-transform:uppercase;">✗ Scenario errored</div>
+      {{- else}}
+        <div style="background:#F3F4F6; color:#374151; padding:10px 28px; font-size:13px; font-weight:600; letter-spacing:.4px; text-transform:uppercase;">{{.Trigger}}</div>
+      {{- end}}
+    </td>
+  </tr>
+
+  <!-- ===== Scenario header ===== -->
+  <tr>
+    <td style="padding:20px 28px 12px;">
+      <div style="font-size:18px; font-weight:600; color:#111827;">{{.Scenario.Name}}</div>
+      {{- if .Scenario.Description}}
+      <div style="font-size:14px; color:#6B7280; margin-top:4px;">{{.Scenario.Description}}</div>
+      {{- end}}
+    </td>
+  </tr>
+
+  <!-- ===== State + meta block ===== -->
+  <tr>
+    <td style="padding:0 28px 16px;">
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="font-size:14px;">
+        <tr>
+          <td style="padding:6px 0; color:#6B7280; width:120px;">State</td>
+          <td style="padding:6px 0; text-align:right;">
+            {{- if eq .State "DONE"}}
+              <span style="display:inline-block; padding:3px 10px; border-radius:12px; background:#DCFCE7; color:#166534; font-weight:600; font-size:12px;">✓ {{.State}}</span>
+            {{- else}}
+              <span style="display:inline-block; padding:3px 10px; border-radius:12px; background:#FEE2E2; color:#991B1B; font-weight:600; font-size:12px;">✗ {{.State}}</span>
+            {{- end}}
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:6px 0; color:#6B7280;">Trigger</td>
+          <td style="padding:6px 0; text-align:right;"><code style="background:#F3F4F6; padding:2px 6px; border-radius:4px; font-size:12px;">{{.Trigger}}</code></td>
+        </tr>
+        <tr>
+          <td style="padding:6px 0; color:#6B7280;">Started</td>
+          <td style="padding:6px 0; text-align:right; font-variant-numeric:tabular-nums;">{{.StartedAt.Format "2006-01-02 15:04:05 MST"}}</td>
+        </tr>
+        <tr>
+          <td style="padding:6px 0; color:#6B7280;">Finished</td>
+          <td style="padding:6px 0; text-align:right; font-variant-numeric:tabular-nums;">{{.FinishedAt.Format "2006-01-02 15:04:05 MST"}}</td>
+        </tr>
+        <tr>
+          <td style="padding:6px 0; color:#6B7280;">Elapsed</td>
+          <td style="padding:6px 0; text-align:right; font-variant-numeric:tabular-nums; font-weight:600;">{{.Elapsed}}</td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+
+  <!-- ===== Counters ===== -->
+  <tr>
+    <td style="padding:0 28px;">
+      <div style="border-top:1px solid #e5e7eb; padding-top:16px; font-size:11px; letter-spacing:1px; color:#6B7280; text-transform:uppercase;">Counters</div>
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-top:8px; font-size:14px;">
+        <tr>
+          <td style="padding:4px 0; color:#374151;">Sent</td>
+          <td style="padding:4px 0; text-align:right; font-variant-numeric:tabular-nums; font-weight:600;">{{.Sent}}</td>
+        </tr>
+        <tr>
+          <td style="padding:4px 0; color:#374151;">Received</td>
+          <td style="padding:4px 0; text-align:right; font-variant-numeric:tabular-nums; font-weight:600;">{{.Received}}</td>
+        </tr>
+        <tr>
+          <td style="padding:4px 0; color:#374151;">Errors</td>
+          <td style="padding:4px 0; text-align:right; font-variant-numeric:tabular-nums; font-weight:600; color:{{if gt .Errors 0}}#DC2626{{else}}#111827{{end}};">{{.Errors}}</td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+
+  <!-- ===== Throughput ===== -->
+  <tr>
+    <td style="padding:16px 28px 0;">
+      <div style="border-top:1px solid #e5e7eb; padding-top:16px; font-size:11px; letter-spacing:1px; color:#6B7280; text-transform:uppercase;">Throughput (msg / sec)</div>
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-top:8px; font-size:14px;">
+        <tr>
+          <td style="padding:4px 0; color:#374151;">current</td>
+          <td style="padding:4px 0; text-align:right; font-variant-numeric:tabular-nums;">{{printf "%.1f" .MsgPerSec}}</td>
+        </tr>
+        <tr>
+          <td style="padding:4px 0; color:#374151;">max</td>
+          <td style="padding:4px 0; text-align:right; font-variant-numeric:tabular-nums; color:#B45309; font-weight:600;">{{printf "%.1f" .MaxMsgPerSec}}</td>
+        </tr>
+        <tr>
+          <td style="padding:4px 0; color:#374151;">avg</td>
+          <td style="padding:4px 0; text-align:right; font-variant-numeric:tabular-nums; color:#B45309; font-weight:600;">{{printf "%.1f" .AvgMsgPerSec}}</td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+
+  <!-- ===== Latency percentiles ===== -->
+  {{- if .Latency}}
+  <tr>
+    <td style="padding:16px 28px 0;">
+      <div style="border-top:1px solid #e5e7eb; padding-top:16px; font-size:11px; letter-spacing:1px; color:#6B7280; text-transform:uppercase;">Latency Percentiles</div>
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-top:8px; font-size:14px;">
+        {{- range .LatencyKeys}}
+        <tr>
+          <td style="padding:4px 0; color:#374151;">{{.}}</td>
+          <td style="padding:4px 0; text-align:right; font-variant-numeric:tabular-nums; color:#B45309; font-weight:600;">{{index $.Latency .}}</td>
+        </tr>
+        {{- end}}
+      </table>
+    </td>
+  </tr>
+  {{- end}}
+
+  <!-- ===== Latency histogram ===== -->
+  {{- if .Histogram}}
+  <tr>
+    <td style="padding:16px 28px 0;">
+      <div style="border-top:1px solid #e5e7eb; padding-top:16px; font-size:11px; letter-spacing:1px; color:#6B7280; text-transform:uppercase;">Latency Histogram</div>
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-top:8px; font-size:13px; border-collapse:collapse;">
+        <thead>
+          <tr style="color:#6B7280; font-weight:500;">
+            <th align="left"  style="padding:4px 8px 4px 0; border-bottom:1px solid #e5e7eb;">Bucket</th>
+            <th align="right" style="padding:4px 8px;       border-bottom:1px solid #e5e7eb;">Count</th>
+            <th align="right" style="padding:4px 0 4px 8px; border-bottom:1px solid #e5e7eb;">%</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{- range .Histogram}}
+          <tr>
+            <td style="padding:4px 8px 4px 0;">{{.Label}}</td>
+            <td style="padding:4px 8px;       text-align:right; font-variant-numeric:tabular-nums;">{{.Count}}</td>
+            <td style="padding:4px 0 4px 8px; text-align:right; font-variant-numeric:tabular-nums; color:#6B7280;">{{printf "%.2f" .Pct}}</td>
+          </tr>
+          {{- end}}
+        </tbody>
+      </table>
+    </td>
+  </tr>
+  {{- end}}
+
+  <!-- ===== Predicates ===== -->
+  {{- if .Predicates}}
+  <tr>
+    <td style="padding:16px 28px 0;">
+      <div style="border-top:1px solid #e5e7eb; padding-top:16px; font-size:11px; letter-spacing:1px; color:#6B7280; text-transform:uppercase;">Predicates</div>
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-top:8px; font-size:13px; border-collapse:collapse;">
+        <thead>
+          <tr style="color:#6B7280; font-weight:500;">
+            <th align="left"  style="padding:4px 8px 4px 0; border-bottom:1px solid #e5e7eb;">Name</th>
+            <th align="right" style="padding:4px 8px;       border-bottom:1px solid #e5e7eb;">Count</th>
+            <th align="right" style="padding:4px 8px;       border-bottom:1px solid #e5e7eb;">%</th>
+            <th align="right" style="padding:4px 8px;       border-bottom:1px solid #e5e7eb;">p50</th>
+            <th align="right" style="padding:4px 8px;       border-bottom:1px solid #e5e7eb;">p95</th>
+            <th align="right" style="padding:4px 0 4px 8px; border-bottom:1px solid #e5e7eb;">p99</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{- range .Predicates}}
+          <tr>
+            <td style="padding:4px 8px 4px 0;">{{.Name}}</td>
+            <td style="padding:4px 8px;       text-align:right; font-variant-numeric:tabular-nums;">{{.Count}}</td>
+            <td style="padding:4px 8px;       text-align:right; font-variant-numeric:tabular-nums; color:#6B7280;">{{printf "%.1f" .Pct}}</td>
+            <td style="padding:4px 8px;       text-align:right; font-variant-numeric:tabular-nums; color:#B45309;">{{.P50}}</td>
+            <td style="padding:4px 8px;       text-align:right; font-variant-numeric:tabular-nums; color:#B45309;">{{.P95}}</td>
+            <td style="padding:4px 0 4px 8px; text-align:right; font-variant-numeric:tabular-nums; color:#B45309;">{{.P99}}</td>
+          </tr>
+          {{- end}}
+        </tbody>
+      </table>
+    </td>
+  </tr>
+  {{- end}}
+
+  <!-- ===== Footer ===== -->
+  <tr>
+    <td style="padding:24px 28px; background:#F9FAFB; border-top:1px solid #e5e7eb; font-size:12px; color:#6B7280; text-align:center;">
+      Generated by <span style="color:#1E3A8A; font-weight:600;">Livecharge OCS LoadTest</span>
+      {{- if .Scenario.Path}}<br><span style="color:#9CA3AF; font-size:11px;">{{.Scenario.Path}}</span>{{- end}}
+    </td>
+  </tr>
+
+</table>
+
+</body>
+</html>

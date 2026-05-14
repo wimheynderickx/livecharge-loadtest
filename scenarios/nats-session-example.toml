@@ -1,0 +1,101 @@
+[scenario]
+name        = "nats-session"
+description = "Two-step NATS session with extraction and branching predicates."
+
+[transport]
+type = "nats"
+url  = "nats://localhost:4222"
+
+[transport.auth]
+type     = "userpass"
+username = "ocs_user"
+password = "secret"
+
+[context]
+terminalId = "TERM-001"
+
+[context.chargeId]
+type  = "sequence"
+start = 1000
+step  = 1
+
+[context.msisdn]
+type   = "random_pick"
+values = ["31612345678", "31698765432"]
+
+[context.amount]
+type = "random_range"
+min  = 100
+max  = 9999
+
+[load]
+rate             = 500
+total_messages   = 10000
+duration         = "5m"
+concurrency      = 50
+response_timeout = "2s"
+
+[metrics]
+percentiles = [50, 75, 90, 95, 99, 99.9]
+# Latency-tab bar chart. Two optional knobs (omit both for the default):
+#   bucket_count      → number of bars; first 75% cover the first 50% of
+#                       [load] response_timeout. Default 20.
+#   bucket_edges_ms   → fully manual list of upper bounds (ms), strictly
+#                       increasing. When set, bucket_count is ignored.
+# Examples:
+#   bucket_count    = 30
+#   bucket_edges_ms = [5, 10, 25, 50, 100, 250, 500, 1000, 2000]
+
+[report]
+csv_path         = "./results/nats-session-{timestamp}.csv"
+timestamp_format = "2006-01-02T15-04-05"
+overwrite        = true
+flush_interval   = "10s"
+
+[[step]]
+name    = "initiate-charge"
+subject = "ocs.charge.initiate"
+template = """
+{
+  "terminalId": "{{.ctx.terminalId}}",
+  "chargeId":   {{.ctx.chargeId}},
+  "msisdn":     "{{.ctx.msisdn}}",
+  "amount":     {{.ctx.amount}}
+}
+"""
+
+  [[step.header]]
+  name  = "X-Correlation-Id"
+  value = "{{.ctx.chargeId}}"
+
+  [[step.extract]]
+  field = "chargeRef"
+  path  = "response/chargeRef"
+
+  [[step.extract]]
+  field = "status"
+  path  = "response/status"
+
+  [[step.predicate]]
+  name      = "happy-flow"
+  field     = "session.status"
+  op        = "eq"
+  value     = "APPROVED"
+  next_step = "confirm-charge"
+
+  [[step.predicate]]
+  name      = "error-flow"
+  field     = "session.status"
+  op        = "eq"
+  value     = "REJECTED"
+  next_step = ""
+
+[[step]]
+name    = "confirm-charge"
+subject = "ocs.charge.confirm"
+template = """
+{
+  "chargeRef":  "{{.session.chargeRef}}",
+  "terminalId": "{{.ctx.terminalId}}"
+}
+"""

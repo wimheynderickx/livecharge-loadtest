@@ -1,0 +1,15 @@
+[suite]
+name        = "full-regression"
+description = "Run NATS session + HTTP basic auth side by side."
+
+[[scenario]]
+file        = "./nats-session.toml"
+description = "NATS happy/error flow"
+
+[[scenario]]
+file        = "./http-basic-auth.toml"
+description = "HTTP charging"
+
+  [scenario.load]
+  rate        = 25
+  concurrency = 3

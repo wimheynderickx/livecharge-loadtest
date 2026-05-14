@@ -1,0 +1,44 @@
+[scenario]
+name        = "http-basic-auth"
+description = "HTTP POST with Basic auth."
+
+[transport]
+type = "http"
+url  = "http://localhost:8080"
+
+[transport.auth]
+type     = "basic"
+username = "ocs_user"
+password = "secret"
+
+[context.amount]
+type = "random_range"
+min  = 100
+max  = 9999
+
+[load]
+rate             = 100
+total_messages   = 500
+concurrency      = 5
+response_timeout = "2s"
+
+[metrics]
+percentiles  = [50, 95, 99]
+bucket_count = 30   # 30 latency-tab bars; first 22 cover the first 50% of response_timeout
+
+[[step]]
+name     = "create-charge"
+method   = "POST"
+path     = "/v1/charges"
+template = """{ "amount": {{.ctx.amount}} }"""
+
+  [[step.extract]]
+  field = "chargeId"
+  path  = "body/id"
+
+  [[step.predicate]]
+  name      = "created"
+  field     = "status"
+  op        = "eq"
+  value     = "200"
+  next_step = ""

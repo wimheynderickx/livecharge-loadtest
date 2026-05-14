@@ -1,0 +1,41 @@
+# Mock NATS subscriber that pairs with scenarios/nats-session.toml.
+#
+# Starts two subscribers:
+#   1. ocs.charge.initiate — replies APPROVED (90%) or REJECTED (10%),
+#      echoing back the chargeId from the request.
+#   2. ocs.charge.confirm  — always replies OK.
+#
+# Usage: loadtest mock --config mock/nats-mock.toml
+
+[transport]
+type = "nats"
+url  = "nats://localhost:4222"
+
+[transport.auth]
+type = "none"
+
+[[endpoint]]
+subject     = "ocs.charge.initiate"
+fail_rate   = 0.1
+ok_response = """
+{
+  "chargeRef": "REF-{{.extracted.chargeId}}",
+  "status":    "APPROVED"
+}
+"""
+fail_response = """
+{
+  "chargeRef": "",
+  "status":    "REJECTED"
+}
+"""
+
+  [[endpoint.extract]]
+  field = "chargeId"
+  path  = "chargeId"
+
+[[endpoint]]
+subject       = "ocs.charge.confirm"
+fail_rate     = 0.0
+ok_response   = """{ "result": "OK" }"""
+fail_response = """{ "result": "FAILED" }"""

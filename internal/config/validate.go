@@ -1,0 +1,450 @@
+package config
+
+import (
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/BurntSushi/toml"
+)
+
+// Defaults that are also referenced from load_files.go.
+const (
+	defaultResponseTimeout = 2 * time.Second
+	defaultFlushInterval   = 10 * time.Second
+)
+
+// ValidationError is one problem found in a config file.
+type ValidationError struct {
+	// Section is the dotted path to the offending field
+	// (e.g. "load.response_timeout" or "step[0].predicate[1].op").
+	Section string
+	// Message describes the problem in plain English.
+	Message string
+}
+
+func (e ValidationError) Error() string {
+	if e.Section == "" {
+		return e.Message
+	}
+	return fmt.Sprintf("%s: %s", e.Section, e.Message)
+}
+
+// ValidationErrors collects every problem from a single file. Returning all
+// of them at once (rather than just the first) lets users fix bad configs in
+// one pass.
+type ValidationErrors struct {
+	File   string
+	Errors []ValidationError
+}
+
+func (e *ValidationErrors) Error() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d problem(s) in %s:\n", len(e.Errors), e.File)
+	for _, ve := range e.Errors {
+		fmt.Fprintf(&b, "  - %s\n", ve.Error())
+	}
+	return b.String()
+}
+
+// ValidateScenario checks a parsed scenario against the cross-field rules
+// described in the design spec. It returns every error it finds.
+func ValidateScenario(cfg *ScenarioConfig, md toml.MetaData) []ValidationError {
+	var errs []ValidationError
+
+	// --- [scenario] block --------------------------------------------------
+	if cfg.Scenario.Name == "" {
+		errs = append(errs, ValidationError{"scenario.name", "must not be empty"})
+	}
+
+	// --- [transport] block -------------------------------------------------
+	switch cfg.Transport.Type {
+	case "nats", "http", "https":
+		// ok
+	case "":
+		errs = append(errs, ValidationError{"transport.type", "must be set (nats, http, or https)"})
+	default:
+		errs = append(errs, ValidationError{
+			"transport.type",
+			fmt.Sprintf("unknown transport %q (valid: nats, http, https)", cfg.Transport.Type),
+		})
+	}
+	if cfg.Transport.URL == "" {
+		errs = append(errs, ValidationError{"transport.url", "must not be empty"})
+	}
+
+	// --- [transport.auth] block --------------------------------------------
+	errs = append(errs, validateAuth(cfg.Transport.Type, cfg.Transport.Auth)...)
+
+	// --- [load] block ------------------------------------------------------
+	if cfg.Load.Concurrency < 1 {
+		errs = append(errs, ValidationError{
+			"load.concurrency",
+			fmt.Sprintf("must be >= 1 (got %d)", cfg.Load.Concurrency),
+		})
+	}
+	if cfg.Load.ResponseTimeout.Duration <= 0 {
+		errs = append(errs, ValidationError{"load.response_timeout", "must be > 0"})
+	}
+	if cfg.Load.Rate < 0 {
+		errs = append(errs, ValidationError{"load.rate", "must be >= 0"})
+	}
+	if cfg.Load.TotalMessages < 0 {
+		errs = append(errs, ValidationError{"load.total_messages", "must be >= 0"})
+	}
+	if cfg.Load.Duration.Duration < 0 {
+		errs = append(errs, ValidationError{"load.duration", "must be >= 0"})
+	}
+
+	// --- [context] block ---------------------------------------------------
+	errs = append(errs, validateContext(cfg.Context, md)...)
+
+	// --- [[step]] blocks ---------------------------------------------------
+	errs = append(errs, validateSteps(cfg)...)
+
+	// --- [metrics] block ---------------------------------------------------
+	for i, p := range cfg.Metrics.Percentiles {
+		if p < 0 || p > 100 {
+			errs = append(errs, ValidationError{
+				fmt.Sprintf("metrics.percentiles[%d]", i),
+				fmt.Sprintf("must be in [0, 100] (got %g)", p),
+			})
+		}
+	}
+	errs = append(errs, validateBuckets(cfg.Metrics)...)
+
+	// --- [report] block ----------------------------------------------------
+	if cfg.Report != nil {
+		if cfg.Report.CSVPath == "" {
+			errs = append(errs, ValidationError{"report.csv_path", "must not be empty when [report] is present"})
+		}
+		if cfg.Report.FlushInterval.Duration <= 0 {
+			errs = append(errs, ValidationError{"report.flush_interval", "must be > 0"})
+		}
+	}
+
+	return errs
+}
+
+// validateAuth checks the auth block in isolation from transport rules,
+// then enforces compatibility between transport.type and auth.type.
+func validateAuth(transport string, auth AuthConfig) []ValidationError {
+	var errs []ValidationError
+
+	switch auth.Type {
+	case "", "none":
+		// always ok
+	case "userpass":
+		if transport != "nats" {
+			errs = append(errs, ValidationError{
+				"transport.auth.type",
+				`"userpass" is only valid for transport type "nats"`,
+			})
+		}
+		if auth.Username == "" || auth.Password == "" {
+			errs = append(errs, ValidationError{
+				"transport.auth",
+				`"userpass" requires both username and password`,
+			})
+		}
+	case "basic":
+		if transport != "http" && transport != "https" {
+			errs = append(errs, ValidationError{
+				"transport.auth.type",
+				`"basic" is only valid for transport type "http" or "https"`,
+			})
+		}
+		if auth.Username == "" || auth.Password == "" {
+			errs = append(errs, ValidationError{
+				"transport.auth",
+				`"basic" requires both username and password`,
+			})
+		}
+	case "jwt":
+		if transport != "http" && transport != "https" {
+			errs = append(errs, ValidationError{
+				"transport.auth.type",
+				`"jwt" is only valid for transport type "http" or "https"`,
+			})
+		}
+		if auth.Token == "" {
+			errs = append(errs, ValidationError{"transport.auth.token", `"jwt" requires a non-empty token`})
+		}
+	default:
+		errs = append(errs, ValidationError{
+			"transport.auth.type",
+			fmt.Sprintf("unknown auth type %q (valid: none, userpass, basic, jwt)", auth.Type),
+		})
+	}
+
+	return errs
+}
+
+// validateContext does a light sanity check on each [context] entry without
+// fully decoding the generators. Full decoding happens in the template
+// package, which has access to the toml.MetaData.
+func validateContext(ctx map[string]toml.Primitive, md toml.MetaData) []ValidationError {
+	var errs []ValidationError
+	for key, prim := range ctx {
+		// Try to decode as a generator description; if it succeeds and Type
+		// is set, validate the inner fields. If decode fails or Type is
+		// empty, assume the entry is a static scalar (validated implicitly
+		// when the template package reads it).
+		var def ContextValueConfig
+		if err := md.PrimitiveDecode(prim, &def); err != nil {
+			// Probably a scalar — accept silently.
+			continue
+		}
+		if def.Type == "" {
+			continue
+		}
+
+		section := "context." + key
+		switch def.Type {
+		case "sequence":
+			if def.Step < 1 {
+				if def.Step == 0 {
+					// step defaults to 1 at runtime, that's fine
+				} else {
+					errs = append(errs, ValidationError{
+						section + ".step",
+						fmt.Sprintf("must be >= 1 (got %d)", def.Step),
+					})
+				}
+			}
+		case "random_range":
+			if def.Min >= def.Max {
+				errs = append(errs, ValidationError{
+					section,
+					fmt.Sprintf("random_range requires min < max (got min=%d, max=%d)", def.Min, def.Max),
+				})
+			}
+		case "random_pick":
+			if len(def.Values) == 0 {
+				errs = append(errs, ValidationError{
+					section + ".values",
+					"random_pick requires at least one value",
+				})
+			}
+		default:
+			errs = append(errs, ValidationError{
+				section + ".type",
+				fmt.Sprintf("unknown generator %q (valid: sequence, random_range, random_pick)", def.Type),
+			})
+		}
+	}
+	return errs
+}
+
+// validateSteps walks the [[step]] list and checks per-step rules plus
+// cross-step rules (unique names, predicate next_step references).
+func validateSteps(cfg *ScenarioConfig) []ValidationError {
+	var errs []ValidationError
+
+	if len(cfg.Steps) == 0 {
+		errs = append(errs, ValidationError{"step", "scenario must define at least one [[step]]"})
+		return errs
+	}
+
+	// Build the set of step names for predicate next_step lookups.
+	names := make(map[string]bool, len(cfg.Steps))
+	for i, s := range cfg.Steps {
+		section := fmt.Sprintf("step[%d]", i)
+		if s.Name == "" {
+			errs = append(errs, ValidationError{section + ".name", "must not be empty"})
+		} else if names[s.Name] {
+			errs = append(errs, ValidationError{
+				section + ".name",
+				fmt.Sprintf("duplicate step name %q", s.Name),
+			})
+		} else {
+			names[s.Name] = true
+		}
+
+		if s.Template == "" {
+			errs = append(errs, ValidationError{section + ".template", "must not be empty"})
+		}
+
+		// Transport-specific fields.
+		switch cfg.Transport.Type {
+		case "nats":
+			if s.Subject == "" {
+				errs = append(errs, ValidationError{section + ".subject", "NATS step must set subject"})
+			}
+		case "http", "https":
+			if s.Path == "" {
+				errs = append(errs, ValidationError{section + ".path", "HTTP step must set path"})
+			}
+			if s.Method == "" {
+				errs = append(errs, ValidationError{section + ".method", "HTTP step must set method"})
+			}
+		}
+
+		if s.FireAndForget && cfg.Transport.Type != "nats" {
+			errs = append(errs, ValidationError{
+				section + ".fire_and_forget",
+				"fire_and_forget is only valid for NATS transport",
+			})
+		}
+
+		if s.ResponseTimeout != nil && s.ResponseTimeout.Duration <= 0 {
+			errs = append(errs, ValidationError{
+				section + ".response_timeout",
+				"must be > 0 when set",
+			})
+		}
+
+		// Validate predicates that belong to this step.
+		for j, p := range s.Predicates {
+			psection := fmt.Sprintf("%s.predicate[%d]", section, j)
+			switch p.Op {
+			case "eq", "ne", "contains", "gt", "lt":
+				// ok
+			case "":
+				errs = append(errs, ValidationError{psection + ".op", "must be set"})
+			default:
+				errs = append(errs, ValidationError{
+					psection + ".op",
+					fmt.Sprintf("unknown op %q (valid: eq, ne, contains, gt, lt)", p.Op),
+				})
+			}
+			if p.Field == "" {
+				errs = append(errs, ValidationError{psection + ".field", "must not be empty"})
+			}
+			if p.Name == "" {
+				errs = append(errs, ValidationError{psection + ".name", "must not be empty"})
+			}
+		}
+
+		// Validate extracts.
+		for j, e := range s.Extracts {
+			esection := fmt.Sprintf("%s.extract[%d]", section, j)
+			if e.Field == "" {
+				errs = append(errs, ValidationError{esection + ".field", "must not be empty"})
+			}
+			if e.Path == "" {
+				errs = append(errs, ValidationError{esection + ".path", "must not be empty"})
+			}
+		}
+	}
+
+	// Second pass: every predicate next_step must reference a known step
+	// or be the empty string.
+	for i, s := range cfg.Steps {
+		for j, p := range s.Predicates {
+			if p.NextStep == "" {
+				continue
+			}
+			if !names[p.NextStep] {
+				errs = append(errs, ValidationError{
+					fmt.Sprintf("step[%d].predicate[%d].next_step", i, j),
+					fmt.Sprintf("references unknown step %q", p.NextStep),
+				})
+			}
+		}
+	}
+
+	return errs
+}
+
+// validateBuckets checks the optional latency-bucket configuration.
+//
+// Rules:
+//   - bucket_count and bucket_edges_ms are mutually exclusive
+//   - bucket_count, when set, must be >= 2 (otherwise the chart is a single
+//     bar and there's no point)
+//   - bucket_edges_ms entries must be strictly increasing and all > 0
+func validateBuckets(m MetricsConfig) []ValidationError {
+	var errs []ValidationError
+
+	if m.BucketCount != 0 && len(m.BucketEdgesMs) > 0 {
+		errs = append(errs, ValidationError{
+			"metrics",
+			"bucket_count and bucket_edges_ms are mutually exclusive; set only one",
+		})
+	}
+
+	if m.BucketCount != 0 && m.BucketCount < 2 {
+		errs = append(errs, ValidationError{
+			"metrics.bucket_count",
+			fmt.Sprintf("must be >= 2 (got %d)", m.BucketCount),
+		})
+	}
+
+	var prev float64
+	for i, e := range m.BucketEdgesMs {
+		section := fmt.Sprintf("metrics.bucket_edges_ms[%d]", i)
+		if e <= 0 {
+			errs = append(errs, ValidationError{section, fmt.Sprintf("must be > 0 (got %g)", e)})
+		}
+		if i > 0 && e <= prev {
+			errs = append(errs, ValidationError{
+				section,
+				fmt.Sprintf("must be strictly greater than the previous edge (got %g after %g)", e, prev),
+			})
+		}
+		prev = e
+	}
+
+	return errs
+}
+
+// ValidateMock checks a mock-server config.
+func ValidateMock(cfg *MockConfig) []ValidationError {
+	var errs []ValidationError
+
+	switch cfg.Transport.Type {
+	case "nats", "http", "https":
+		// ok
+	case "":
+		errs = append(errs, ValidationError{"transport.type", "must be set (nats, http, or https)"})
+	default:
+		errs = append(errs, ValidationError{
+			"transport.type",
+			fmt.Sprintf("unknown transport %q", cfg.Transport.Type),
+		})
+	}
+	if cfg.Transport.URL == "" {
+		errs = append(errs, ValidationError{"transport.url", "must not be empty"})
+	}
+	if len(cfg.Endpoints) == 0 {
+		errs = append(errs, ValidationError{"endpoint", "mock must define at least one [[endpoint]]"})
+	}
+
+	for i, ep := range cfg.Endpoints {
+		section := fmt.Sprintf("endpoint[%d]", i)
+		switch cfg.Transport.Type {
+		case "nats":
+			if ep.Subject == "" {
+				errs = append(errs, ValidationError{section + ".subject", "must be set for NATS mocks"})
+			}
+		case "http", "https":
+			if ep.Path == "" {
+				errs = append(errs, ValidationError{section + ".path", "must be set for HTTP mocks"})
+			}
+		}
+		if ep.FailRate < 0 || ep.FailRate > 1 {
+			errs = append(errs, ValidationError{
+				section + ".fail_rate",
+				fmt.Sprintf("must be in [0, 1] (got %g)", ep.FailRate),
+			})
+		}
+		if ep.NoAnswerRate < 0 || ep.NoAnswerRate > 1 {
+			errs = append(errs, ValidationError{
+				section + ".no_answer_rate",
+				fmt.Sprintf("must be in [0, 1] (got %g)", ep.NoAnswerRate),
+			})
+		}
+		if ep.OkResponse == "" {
+			errs = append(errs, ValidationError{section + ".ok_response", "must not be empty"})
+		}
+		if ep.FailResponse == "" && ep.FailRate > 0 {
+			errs = append(errs, ValidationError{
+				section + ".fail_response",
+				"must be set when fail_rate > 0",
+			})
+		}
+	}
+
+	return errs
+}

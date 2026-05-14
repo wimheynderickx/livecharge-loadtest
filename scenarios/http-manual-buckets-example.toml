@@ -1,0 +1,50 @@
+[scenario]
+name        = "http-basic-auth-manual-buckets"
+description = "Same as http-basic-auth.toml, but with manual latency buckets."
+
+[transport]
+type = "http"
+url  = "http://localhost:8080"
+
+[transport.auth]
+type     = "basic"
+username = "ocs_user"
+password = "secret"
+
+[context.amount]
+type = "random_range"
+min  = 100
+max  = 9999
+
+[load]
+rate             = 0
+total_messages   = 5000000
+concurrency      = 5
+response_timeout = "2s"
+
+[metrics]
+percentiles = [50, 95, 99, 99.9,99.99,100]
+
+# Fully manual latency buckets. Each entry is the inclusive upper bound of
+# one bar in the Latency tab (in milliseconds; fractional values are
+# allowed — the histogram records latencies at microsecond resolution).
+# The TUI adds an automatic overflow bar (">1000 ms" here) for anything
+# above the last edge — that's the "1+ s" bucket.
+bucket_edges_ms = [0.01,0.02,0.05,0.1, 0.2, 0.5, 1, 2, 3, 4, 5, 10, 20, 50, 100, 200, 500, 1000]
+
+[[step]]
+name     = "create-charge"
+method   = "POST"
+path     = "/v1/charges"
+template = """{ "amount": {{.ctx.amount}} }"""
+
+  [[step.extract]]
+  field = "chargeId"
+  path  = "body/id"
+
+  [[step.predicate]]
+  name      = "created"
+  field     = "status"
+  op        = "eq"
+  value     = "200"
+  next_step = ""

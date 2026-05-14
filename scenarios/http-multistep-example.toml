@@ -1,0 +1,117 @@
+[scenario]
+name        = "http-basic-auth-manual-buckets-multistep"
+description = "Three-step HTTP session: create → query → confirm. Same buckets as the single-step variant."
+
+[transport]
+type = "http"
+url  = "http://localhost:8080"
+
+[transport.auth]
+type     = "basic"
+username = "ocs_user"
+password = "secret"
+
+[context.amount]
+type = "random_range"
+min  = 100
+max  = 9999
+
+[load]
+rate             = 0
+# total_messages is the number of SESSIONS. With 3 steps per session this
+# yields ~3× the HTTP request count of the single-step variant.
+total_messages   = 1666666
+concurrency      = 5
+response_timeout = "2s"
+
+[metrics]
+percentiles = [50, 95, 99, 99.9, 99.99, 100]
+
+# Same fractional-ms buckets as the single-step variant so the two runs
+# can be visually compared on the Latency tab.
+bucket_edges_ms = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 3, 4, 5, 10, 20, 50, 100, 200, 500, 1000]
+
+# ---------------------------------------------------------------------------
+# Session flow
+#
+#   create-charge      POST /v1/charges       → extract id
+#        │
+#        ▼ (status==200)
+#   query-status       POST /v1/charges       → extract status, send chargeId
+#        │
+#        ▼ (status==200)
+#   confirm-charge     POST /v1/charges       → final step, ends session
+#
+# The example mock (mock/http-mock.toml) replies with the SAME body shape on
+# every POST /v1/charges, so all three steps share that endpoint. In a real
+# OCS test you'd point each step at a distinct path.
+# ---------------------------------------------------------------------------
+
+[[step]]
+name     = "create-charge"
+method   = "POST"
+path     = "/v1/charges"
+template = """{ "amount": {{.ctx.amount}} }"""
+
+  [[step.extract]]
+  field = "chargeId"
+  path  = "body/id"
+
+  [[step.predicate]]
+  name      = "created"
+  field     = "status"
+  op        = "eq"
+  value     = "200"
+  next_step = "query-status"
+
+  # Fallback: any non-200 ends the session early.
+  [[step.predicate]]
+  name      = "create-error"
+  field     = "status"
+  op        = "ne"
+  value     = "200"
+  next_step = ""
+
+[[step]]
+name     = "query-status"
+method   = "POST"
+path     = "/v1/charges"
+template = """{ "chargeId": "{{.session.chargeId}}", "action": "status" }"""
+
+  [[step.extract]]
+  field = "queryStatus"
+  path  = "body/status"
+
+  [[step.predicate]]
+  name      = "queried"
+  field     = "status"
+  op        = "eq"
+  value     = "200"
+  next_step = "confirm-charge"
+
+  [[step.predicate]]
+  name      = "query-error"
+  field     = "status"
+  op        = "ne"
+  value     = "200"
+  next_step = ""
+
+[[step]]
+name     = "confirm-charge"
+method   = "POST"
+path     = "/v1/charges"
+template = """{ "chargeId": "{{.session.chargeId}}", "action": "confirm", "amount": {{.ctx.amount}} }"""
+
+  [[step.predicate]]
+  name      = "confirmed"
+  field     = "status"
+  op        = "eq"
+  value     = "200"
+  next_step = ""
+
+  [[step.predicate]]
+  name      = "confirm-error"
+  field     = "status"
+  op        = "ne"
+  value     = "200"
+  next_step = ""

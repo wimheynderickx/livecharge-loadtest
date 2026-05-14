@@ -1,0 +1,30 @@
+[scenario]
+name        = "fire-and-forget"
+description = "NATS publish without expecting a reply."
+
+[transport]
+type = "nats"
+url  = "nats://localhost:4222"
+
+[transport.auth]
+type = "none"
+
+[context.chargeId]
+type  = "sequence"
+start = 1
+step  = 1
+
+[load]
+rate             = 200
+total_messages   = 5000
+concurrency      = 20
+response_timeout = "1s"
+
+[metrics]
+percentiles = [50, 95, 99]
+
+[[step]]
+name             = "emit-event"
+subject          = "ocs.events"
+fire_and_forget  = true
+template         = """{ "event": "charge-started", "chargeId": {{.ctx.chargeId}} }"""

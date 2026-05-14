@@ -1,0 +1,86 @@
+[scenario]
+name        = "http-basic-auth-with-mail"
+description = "Same as http-basic-auth-manual-buckets.toml, plus a post-run email summary."
+
+[transport]
+type = "http"
+url  = "http://localhost:8080"
+
+[transport.auth]
+type     = "basic"
+username = "ocs_user"
+password = "secret"
+
+[context.amount]
+type = "random_range"
+min  = 100
+max  = 9999
+
+[load]
+rate             = 0
+total_messages   = 3000000
+concurrency      = 5
+response_timeout = "2s"
+
+[metrics]
+percentiles = [50, 95, 99, 99.9, 99.99, 100]
+bucket_edges_ms = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 3, 4, 5, 10, 20, 50, 100, 200, 500, 1000]
+
+# ---------------------------------------------------------------------------
+# Email notification — see manual §8 for the full reference.
+#
+# This block is the scenario's *floor*. Any field also set in
+# --mail-config or via a --mail-* CLI flag overrides what's here per
+# field, so you can keep recipients here and put SMTP credentials in a
+# separate shared file.
+#
+# Defaults assume a local MailHog (https://github.com/mailhog/MailHog) on
+# port 1025 — the easiest way to actually see emails arrive without a
+# real provider:
+#
+#   docker run -p 1025:1025 -p 8025:8025 mailhog/mailhog
+#   open http://localhost:8025   # MailHog's web UI
+#
+# Swap smtp_host / smtp_port / credentials when wiring against a real
+# server.
+# ---------------------------------------------------------------------------
+[email]
+enabled         = true
+on              = ["start", "progress", "done", "error"]
+send_timeout    = "30s"
+report_interval = "10s"                                            # cadence for "progress" emails — required when "progress" is in `on`
+attach_log      = true
+
+smtp_host    = "localhost"
+smtp_port    = 1025                                                # MailHog by default
+smtp_user    = ""                                                  # MailHog accepts unauthenticated
+smtp_pass    = ""
+
+from         = "Livecharge OCS LoadTest <noreply@livecharge.local>"
+to           = ["ops@example.com"]
+subject      = "[Livecharge] {{.Scenario.Name}} {{.State}} — p99 {{.Latency.p99}}"
+
+# Body templates. Leave both unset for the built-in plain-text default.
+# Set template_file_html to ship a richly-formatted HTML email — the text
+# fallback comes from template / template_file, or the built-in default
+# when those are empty. When both are set the email goes out as
+# multipart/alternative.
+template_file_html = "mail-templates/mail-default.html.tmpl"
+# template_file    = "mail-templates/mail-default.txt.tmpl"   # optional text override
+
+[[step]]
+name     = "create-charge"
+method   = "POST"
+path     = "/v1/charges"
+template = """{ "amount": {{.ctx.amount}} }"""
+
+  [[step.extract]]
+  field = "chargeId"
+  path  = "body/id"
+
+  [[step.predicate]]
+  name      = "created"
+  field     = "status"
+  op        = "eq"
+  value     = "200"
+  next_step = ""

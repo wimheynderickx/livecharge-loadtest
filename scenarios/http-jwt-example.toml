@@ -1,0 +1,35 @@
+[scenario]
+name        = "http-jwt"
+description = "HTTPS POST with JWT Bearer token."
+
+[transport]
+type = "https"
+url  = "https://api.example.com"
+
+[transport.auth]
+type  = "jwt"
+token = "REPLACE_WITH_REAL_TOKEN"
+
+[context.amount]
+type = "random_range"
+min  = 100
+max  = 9999
+
+[load]
+rate             = 25
+total_messages   = 200
+concurrency      = 5
+response_timeout = "5s"
+
+[metrics]
+percentiles = [50, 95, 99]
+
+[[step]]
+name     = "create-charge"
+method   = "POST"
+path     = "/v1/charges"
+template = """{ "amount": {{.ctx.amount}} }"""
+
+  [[step.extract]]
+  field = "chargeId"
+  path  = "body/id"
