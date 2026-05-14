@@ -1,6 +1,28 @@
-# Operational Manual — Livecharge OCS LoadTest
+# Livecharge OCS LoadTest
   
 **Version:** 0.1
+
+`loadtest` is a standalone Go CLI load-testing tool. It sends JSON payloads over NATS or HTTP(S), supports multi-step sessions with conditional branching, measures latency and throughput, and renders a live TUI dashboard. Configuration is entirely TOML-based. A built-in mock server enables self-contained testing without any dependencies.
+
+This tool is used by Channel Technologies for testing their Livecharge product range, an OCS (Online Charging System) and Billing Suite.
+
+**Channel Systems** is a software vendor located in The Netherlands, specialized in carrier-grade software for MNO, MVNE, MVNE and IoT service providers.
+Check out https://channel.tech/ for more information about their product portfolio, such as **LiveCharge** (Rating, Billing and Charging), **LiveCore** (CRM and BSS) and **LiveCom** (Voice AI applications)
+
+## Main features
+
+- **Live TUI dashboard** to dynamically interact with your testcases — start, stop, resume, restart, add and remove scenarios on the fly.
+- **Multi-protocol transport** — NATS and HTTP/HTTPS with `none`, `userpass`, HTTP Basic, and JWT Bearer auth.
+- **Multi-step sessions** with JSON / header / status-code extraction and predicate-driven conditional flow.
+- **Sub-millisecond latency measurement** using HDR histograms with configurable buckets (auto or fully manual edges).
+- **High Performance** as it can send thousands of messages per second.
+- **Realtime throughput stats** — current, peak, and lifetime-average msg/sec.
+- **CSV export** with float-ms latency columns, predicate counts, and `{timestamp}` placeholders.
+- **Suite runs** — execute multiple scenarios concurrently from a single suite file.
+- **Built-in mock server** (NATS + HTTP) with configurable `fail_rate` and `no_answer_rate` for realistic failure simulation.
+- **Post-run email notifications** over SMTP (STARTTLS + auth) with text, HTML, or `multipart/alternative` body, log attachments, and templated subject/body.
+- **Headless / CI mode** with structured logs and proper exit codes.
+- **Embedded operational manual** — view it from inside the TUI (`m`) or via `loadtest manual`.
 
 ---
 
@@ -19,12 +41,13 @@
 5. [Writing a Scenario File](#5-writing-a-scenario-file)
 6. [Writing a Suite File](#6-writing-a-suite-file)
 7. [Writing a Mock Config File](#7-writing-a-mock-config-file)
-8. [TUI Dashboard — Controls](#8-tui-dashboard--controls)
-9. [Running Without a Terminal (CI / Docker)](#9-running-without-a-terminal-ci--docker)
-10. [Docker](#10-docker)
-11. [CSV Reports](#11-csv-reports)
-12. [Common Recipes](#12-common-recipes)
-13. [Troubleshooting](#13-troubleshooting)
+8. [Email Notifications](#8-email-notifications)
+9. [TUI Dashboard — Controls](#9-tui-dashboard--controls)
+10. [Running Without a Terminal (CI / Docker)](#10-running-without-a-terminal-ci--docker)
+11. [Docker](#11-docker)
+12. [CSV Reports](#12-csv-reports)
+13. [Common Recipes](#13-common-recipes)
+14. [Troubleshooting](#14-troubleshooting)
 
 ---
 
@@ -672,7 +695,234 @@ no_answer_rate = 0.01
 
 ---
 
-## 8. TUI Dashboard — Controls
+## 8. Email Notifications
+
+`loadtest` can email a run-summary when a scenario finishes (DONE) or fails
+fatally (ERROR). The feature is opt-in: with no `[email]` block and no `--mail-*`
+flags, nothing is sent.
+
+### 8.1 Configuration sources
+
+Three layers compose into the final email configuration. Each is merged **per
+field** — later layers override earlier ones, fields not touched fall through.
+
+| Layer | Source | Precedence |
+| --- | --- | --- |
+| 1 | Scenario file `[email]` block | floor — per-scenario defaults |
+| 2 | `--mail-config <file>` shared TOML | overrides layer 1 |
+| 3 | Individual `--mail-*` CLI flags | overrides everything |
+
+Set credentials in a shared `mail-config.toml`, the recipient list in the
+scenario, and override the subject on the command line for a one-off run.
+Each layer is optional; you can configure everything in any one of them.
+
+The SMTP password also reads from the `LOADTEST_SMTP_PASS` environment
+variable when no `smtp_pass` or `--mail-smtp-pass` is set — handy for CI.
+
+### 8.2 Scenario `[email]` block
+
+```toml
+[email]
+enabled         = true
+on              = ["start", "progress", "done", "error"]   # see §8.2.1 below
+send_timeout    = "30s"
+report_interval = "5m"                 # cadence for "progress" emails (required when "progress" is in `on`)
+attach_log      = true                 # attach scenario log + --log-file
+
+smtp_host     = "smtp.gmail.com"
+smtp_port     = 587                    # default 587 (STARTTLS submission)
+smtp_user     = "user@example.com"
+smtp_pass     = "app-password"
+
+from          = "Livecharge OCS LoadTest <noreply@example.com>"
+to            = ["alice@example.com", "bob@example.com"]
+cc            = []
+bcc           = []
+subject       = "[Livecharge] {{.Scenario.Name}} — {{.State}}"
+
+# Body templates — set zero, one, or both. The text and html slots are
+# independent: when both are populated, the email goes out as
+# multipart/alternative so every mail client picks the format it can
+# render best. Empty slots fall back to the built-in plain-text default
+# for text; HTML stays off unless you opt in.
+template           = ""                                       # inline plain-text
+template_file      = "mail-templates/mail-default.txt.tmpl"   # plain-text from file
+template_html      = ""                                       # inline html
+template_file_html = "mail-templates/mail-default.html.tmpl"  # html from file
+```
+
+**`enabled`** turns the feature on. **`attach_log`** attaches the
+scenario's recent log buffer inline **and** the full `--log-file`
+contents when set (capped at 1 MB — truncated tail with a marker line
+when larger).
+
+#### 8.2.1 Lifecycle triggers — what `on` accepts
+
+`on` is a list naming which lifecycle events should send an email. The
+default (when omitted) is `["done", "error"]` — terminal-only — so
+existing configs keep their behaviour. Any combination is allowed:
+
+| Trigger | Fires when… | Notes |
+| --- | --- | --- |
+| `start` | The scenario transitions IDLE → RUNNING from a fresh `Start()` or `Restart()`. | **Not** fired on `Resume()` (the scenario continues a prior run). The email reports `state = RUNNING`, sent and received counters at 0, no latency yet. |
+| `progress` | Every `report_interval` while the scenario is RUNNING. | Requires `report_interval > 0`. The ticker pauses during STOPPED state and resumes on Resume. **Cancelled the moment the scenario reaches DONE or ERROR** — a run that finishes before the next tick gets no stale progress email. |
+| `done` | The scenario reaches its `total_messages` / `duration` limit. | Fired once. |
+| `error` | The scenario terminates with a fatal transport failure. | Fired once. Mutually exclusive with `done` for a given run. |
+
+**`report_interval`** is required when `progress` is in `on`; the
+loaded config is rejected at startup otherwise. A 5-minute cadence is
+reasonable for soak / overnight tests; sub-minute intervals are
+allowed but rarely useful (the TUI Overview tab already shows live
+stats). Manual `Stop` (`s` in the TUI) does **not** fire any email —
+stopping is user-initiated and the user is already at the terminal.
+
+Templates can branch on the reason via `{{.Trigger}}`, e.g.:
+
+```text
+{{if eq .Trigger "error"}}🚨 OCS load test failed{{else}}{{.Scenario.Name}}{{end}}
+```
+
+The built-in HTML template renders a coloured banner per trigger; the
+built-in text template prints a `=== Sent because: <trigger> ===`
+header so the recipient never has to guess which event the mail is
+about.
+
+### 8.3 `mail-config.toml` (shared file)
+
+Same body as the `[email]` block but without the header — the whole file
+*is* the email config:
+
+```toml
+enabled    = true
+smtp_host  = "smtp.gmail.com"
+smtp_port  = 587
+smtp_user  = "user@example.com"
+smtp_pass  = "app-password"
+from       = "Livecharge OCS LoadTest <noreply@example.com>"
+to         = ["ops@example.com"]
+attach_log = true
+```
+
+Reference it with `--mail-config path/to/mail-config.toml`.
+
+### 8.4 CLI flags
+
+| Flag | Description |
+| --- | --- |
+| `--mail-config <file>` | Load shared email settings from this TOML file. |
+| `--mail-enabled` / `--no-mail` | Force enable / disable regardless of TOML. `--no-mail` wins when both are passed. |
+| `--mail-to addr,addr` | Recipients (To:). Comma-separated. |
+| `--mail-cc addr,addr` | Recipients (Cc:). |
+| `--mail-bcc addr,addr` | Recipients (Bcc:). Not exposed in headers; still RCPT'd. |
+| `--mail-from addr` | From: address. Default: `Livecharge OCS LoadTest <noreply@livecharge.local>`. |
+| `--mail-subject <tpl>` | Subject template (text/template). Default: `[Livecharge] {{.Scenario.Name}} — {{.State}}`. |
+| `--mail-smtp-host host` | SMTP server hostname. |
+| `--mail-smtp-port port` | SMTP server port. Default 587. |
+| `--mail-smtp-user user` | SMTP auth username. |
+| `--mail-smtp-pass pass` | SMTP auth password (or set `$LOADTEST_SMTP_PASS`). |
+| `--mail-template <file>` | Path to body template file. Default: built-in. |
+| `--mail-attach-log` | Attach scenario log + `--log-file` to the email. |
+| `--mail-on done,error` | Lifecycle events that trigger the email. |
+
+### 8.5 Body & subject templates
+
+Subject and body use Go's `text/template` syntax. The same context is
+exposed to both, so any field below is usable in either.
+
+| Placeholder | Type | Example |
+| --- | --- | --- |
+| `{{.Scenario.Name}}` | string | `charge-flow` |
+| `{{.Scenario.Description}}` | string | `Happy/error mix` |
+| `{{.Scenario.Path}}` | string | `/scenarios/charge.toml` |
+| `{{.State}}` | string | `DONE` / `ERROR` |
+| `{{.Trigger}}` | string | `done` / `error` |
+| `{{.StartedAt}}` | time.Time | use `.Format` |
+| `{{.FinishedAt}}` | time.Time | |
+| `{{.Elapsed}}` | string | `00:01:30` |
+| `{{.Sent}}` `{{.Received}}` `{{.Errors}}` | int64 | tab-1 counters |
+| `{{.MsgPerSec}}` `{{.MaxMsgPerSec}}` `{{.AvgMsgPerSec}}` | float64 | tab-1 throughput |
+| `{{.Latency.p50}}` `{{.Latency.p99}}` `{{.Latency.p99.9}}` | string | tab-1 percentiles (already formatted, e.g. `0.135 ms`) |
+| `{{range .Histogram}}` | iter `{Label, Count, Pct}` | tab-2 histogram |
+| `{{range .Predicates}}` | iter `{Name, Count, Pct, P50, P95, P99}` | tab-3 predicates |
+
+A bad placeholder in the subject template falls back to a literal subject
+(`[Livecharge] <name> finished (<state>)`) so a typo doesn't lose the email.
+A bad placeholder in the body template marks the email **Failed** and is
+shown in the TUI Overview tab — partial bodies are worse than no email.
+
+#### Plain-text, HTML, or both
+
+The text and html slots are independent — set zero, one, or both:
+
+| Configuration | What gets sent |
+| --- | --- |
+| neither set | Built-in plain-text default, MIME type `text/plain` |
+| `template` or `template_file` only | Your text body, MIME type `text/plain` |
+| `template_html` or `template_file_html` only | Your HTML body **plus** the built-in text default as a fallback, sent as `multipart/alternative` |
+| both text *and* html templates set | Your text + your HTML, sent as `multipart/alternative` |
+
+When `multipart/alternative` is used, every modern client (Gmail, Outlook,
+Apple Mail, …) displays the HTML version; plain-text readers and
+accessibility tools show the text version.
+
+A starter HTML template ships in `mail-templates/mail-default.html.tmpl`.
+Point at it like so:
+
+```toml
+[email]
+template_file_html = "mail-templates/mail-default.html.tmpl"
+# leave template / template_file unset to use the built-in text fallback
+```
+
+The built-in default text template covers every section the TUI shows
+(overview, latency table, histogram, predicates).
+
+### 8.6 Status display in the TUI
+
+The Overview tab shows the email state at the bottom while it sends:
+
+```text
+EMAIL  📧 sending to alice@example.com…
+EMAIL  📧 sent to alice@example.com at 15:42:18    (green)
+EMAIL  📧 FAILED — auth: 535 Authentication failed (red)
+```
+
+When email is disabled for a scenario, the row is hidden entirely.
+
+### 8.7 Async send and graceful shutdown
+
+Email goes out in a background goroutine so a slow SMTP server can't
+block scenario teardown. On `q` (quit), loadtest waits up to 60 s for any
+in-flight sends; if a goroutine is still running at that point it's
+abandoned and the scenario log carries a `FAILED — context deadline`
+note.
+
+### 8.8 Testing with a mock SMTP server
+
+The test suite uses `github.com/mhale/smtpd` to spin up a real SMTP
+server in-process on a random local port. Tests start one with
+`newMockServer(t, authRequired bool)`, point the sender at its address,
+and assert against captured envelopes:
+
+```go
+srv := newMockServer(t, /*authRequired=*/ false)
+sender := srv.senderFor(Config{From: "alice@x", To: []string{"bob@x"}})
+<-sender.SendAsync(Message{Body: "hi"}, &Status{})
+if got := srv.Deliveries(); len(got) != 1 { ... }
+```
+
+This setup covers PLAIN/LOGIN auth, attachments, multipart MIME,
+dial-failure recording, and BCC handling. See
+`internal/mail/sender_test.go` for the full suite.
+
+For ad-hoc end-to-end testing against a real-looking mailbox without a
+real provider, run [MailHog](https://github.com/mailhog/MailHog) in
+Docker on port 1025 and point `--mail-smtp-host=localhost
+--mail-smtp-port=1025` at it.
+
+---
+
+## 9. TUI Dashboard — Controls
 
 The TUI opens automatically when you run `loadtest run` without `--no-tui`.
 
@@ -749,9 +999,32 @@ avg/s:   1,987
 
 ### Add Scenario Picker (`a`)
 
-Pressing `a` opens a modal that lists every `.toml` scenario file discovered in
-`--config-dirs`. Scenarios already loaded are excluded. Use `↑` / `↓` to navigate, `Enter`
-to load the highlighted scenario, and `Esc` to cancel.
+Pressing `a` opens a modal that lists every `.toml` scenario file discovered in the
+auto-scanned directories (see below). Scenarios already loaded are excluded. Use `↑` / `↓`
+to navigate, `Enter` to load the highlighted scenario, `Esc` to cancel.
+
+From inside the picker, press **`b`** to switch to the file browser — useful when the
+scenario you want lives outside the scanned folders. The picker closes and the browser
+opens at the current working directory; pick any `.toml` and you're back in the dashboard
+with the new scenario added.
+
+#### Which folders does the picker scan?
+
+When `--config-dirs` is set at startup, those directories — and only those — are scanned.
+
+When `--config-dirs` is **not** given, the picker auto-scans the current working
+directory plus a short list of conventional subfolders that exist:
+
+| Default scan locations (when no `--config-dirs`) |
+| --- |
+| `.` (the directory you launched `loadtest` from) |
+| `./scenarios` / `./scenario` |
+| `./templates` |
+| `./tests` / `./test` |
+
+Each subfolder is added only when it actually exists. To override entirely, pass
+`--config-dirs path1,path2`. To reach anywhere else without reconfiguring, use the `b`
+file browser from inside the picker.
 
 ### Remove Scenario (`x`)
 
@@ -764,6 +1037,9 @@ cleaned up. Press `y` / `Enter` to confirm or `n` / `Esc` to cancel.
 Pressing `b` opens a filesystem navigator. Only `.toml` files are selectable. Navigate with
 `↑` / `↓`, open directories with `→` or `Enter`, go up a level with `←`. Press `Enter` on
 a `.toml` file to load it as a new scenario.
+
+`b` is also reachable from inside the `a` picker — handy when the scenario you want
+isn't in the auto-scanned set.
 
 ### In-Dashboard Manual (`m`)
 
@@ -783,7 +1059,7 @@ return to the normal dashboard view. The scroll percentage is shown in the foote
 
 ---
 
-## 9. Running Without a Terminal (CI / Docker)
+## 10. Running Without a Terminal (CI / Docker)
 
 Use `--no-tui` to disable the dashboard and print stats to stdout:
 
@@ -806,7 +1082,7 @@ loadtest run charge-flow.toml --no-tui --log-file ./run-errors.log
 
 ---
 
-## 10. Docker
+## 11. Docker
 
 ### Run a scenario
 
@@ -853,7 +1129,7 @@ docker compose up
 
 ---
 
-## 11. CSV Reports
+## 12. CSV Reports
 
 Enable CSV output in your scenario's `[report]` block:
 
@@ -888,7 +1164,7 @@ are **float milliseconds** with three decimal places, giving sub-millisecond res
 
 ---
 
-## 12. Common Recipes
+## 13. Common Recipes
 
 ### One-shot single message (smoke test)
 
@@ -999,9 +1275,43 @@ Set `response_timeout` in the scenario to control how long the client waits:
 response_timeout = "2s"
 ```
 
+### Email a run summary
+
+Minimal scenario that emails its results on completion:
+
+```toml
+[email]
+enabled    = true
+smtp_host  = "smtp.example.com"
+smtp_user  = "alerts@example.com"
+smtp_pass  = ""                 # set LOADTEST_SMTP_PASS instead
+from       = "Livecharge OCS LoadTest <noreply@example.com>"
+to         = ["ops@example.com"]
+attach_log = true
+```
+
+Run with credentials from the environment:
+
+```bash
+LOADTEST_SMTP_PASS=app-password loadtest run charge-flow.toml
+```
+
+Override the subject for one specific run without touching the scenario:
+
+```bash
+loadtest run charge-flow.toml \
+  --mail-subject "[CI] {{.Scenario.Name}} {{.State}} in {{.Elapsed}}"
+```
+
+Force-disable email for a run that has it configured in TOML:
+
+```bash
+loadtest run charge-flow.toml --no-mail
+```
+
 ---
 
-## 13. Troubleshooting
+## 14. Troubleshooting
 
 ### "connection refused" on NATS
 
@@ -1064,3 +1374,26 @@ response_timeout = "2s"
 - If colours look wrong, the glamour renderer may have chosen an incompatible theme; try
   `loadtest manual --raw | less` to read the plain Markdown source
 
+### Email row shows "FAILED" in the Overview tab
+
+- Inspect the error suffix in the TUI row; common causes:
+  - `dial …: connection refused` — wrong `smtp_host` / `smtp_port`, server down
+  - `STARTTLS: …` — the server didn't advertise STARTTLS but credentials were
+    provided. Loadtest refuses to send the password in cleartext unless the
+    target is loopback. Either remove the credentials or point at a port that
+    speaks STARTTLS (usually 587).
+  - `auth: …` — bad username / password. For Gmail and similar, generate an
+    app-specific password; the regular account password won't work.
+  - `render body: …` — typo in the body template. The subject template falls
+    back to a literal on error, but a bad body fails the whole send.
+
+### Email is configured but nothing arrives
+
+- The scenario must reach **DONE** or **ERROR**. Pressing `s` (stop) doesn't
+  trigger the email — that's user-initiated, not a terminal lifecycle event.
+- Check the `on = […]` list; it defaults to `["done", "error"]` but a custom
+  list may have excluded the event your scenario hit.
+- Look for an error in the Overview tab. If you see `📧 sent at …` but the
+  inbox is empty, check the recipient's spam folder; the default
+  `noreply@livecharge.local` From: address is suspicious to many providers.
+  Set a real `--mail-from` for production use.
