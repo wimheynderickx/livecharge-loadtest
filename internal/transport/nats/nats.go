@@ -7,6 +7,7 @@ package nats
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	natsclient "github.com/nats-io/nats.go"
@@ -17,7 +18,8 @@ import (
 
 // Transport sends requests over NATS.
 type Transport struct {
-	conn *natsclient.Conn
+	conn  *natsclient.Conn
+	proto atomic.Value // string — set by captureVersion after Connect
 }
 
 // New connects to the NATS server described in cfg and returns a Transport
@@ -43,7 +45,24 @@ func New(cfg config.TransportConfig) (*Transport, error) {
 		return nil, fmt.Errorf("nats connect %s: %w", cfg.URL, err)
 	}
 
-	return &Transport{conn: conn}, nil
+	t := &Transport{conn: conn}
+	t.captureVersion()
+	return t, nil
+}
+
+// captureVersion records the connected server's version into the proto
+// atomic so Protocol() returns the right value after Connect.
+func (t *Transport) captureVersion() {
+	if t.conn == nil {
+		t.proto.Store("NATS (connecting)")
+		return
+	}
+	ver := t.conn.ConnectedServerVersion()
+	if ver == "" {
+		t.proto.Store("NATS")
+		return
+	}
+	t.proto.Store("NATS " + ver)
 }
 
 // Send publishes the request and, unless FireAndForget is set, waits for a
@@ -106,8 +125,11 @@ func (t *Transport) Close() error {
 	return nil
 }
 
-// Protocol returns a placeholder string until Task 6 wires the real
-// server-version capture.
+// Protocol returns the NATS server version captured at connect time,
+// e.g. "NATS 2.10". Returns "NATS (connecting)" when no connection exists.
 func (t *Transport) Protocol() string {
+	if v, ok := t.proto.Load().(string); ok && v != "" {
+		return v
+	}
 	return "NATS (connecting)"
 }
