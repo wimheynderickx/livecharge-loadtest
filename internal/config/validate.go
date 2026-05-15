@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -71,6 +73,34 @@ func ValidateScenario(cfg *ScenarioConfig, md toml.MetaData) []ValidationError {
 	}
 	if cfg.Transport.URL == "" {
 		errs = append(errs, ValidationError{"transport.url", "must not be empty"})
+	} else {
+		parsed, perr := url.Parse(cfg.Transport.URL)
+		if perr != nil {
+			errs = append(errs, ValidationError{"transport.url", "invalid URL: " + perr.Error()})
+		} else {
+			scheme := strings.ToLower(parsed.Scheme)
+
+			if scheme == "h2c" && cfg.Transport.HTTP2 != nil && !*cfg.Transport.HTTP2 {
+				errs = append(errs, ValidationError{
+					"transport.http2",
+					"http2=false has no effect on h2c:// URLs; remove the scheme or the flag",
+				})
+			}
+			if cfg.Transport.TLS != nil && scheme != "https" {
+				errs = append(errs, ValidationError{
+					"transport.tls",
+					"[transport.tls] requires https:// scheme; got " + parsed.Scheme,
+				})
+			}
+			if cfg.Transport.TLS != nil && cfg.Transport.TLS.CAFile != "" {
+				if _, err := os.Stat(cfg.Transport.TLS.CAFile); err != nil {
+					errs = append(errs, ValidationError{
+						"transport.tls.ca_file",
+						err.Error(),
+					})
+				}
+			}
+		}
 	}
 
 	// --- [transport.auth] block --------------------------------------------
