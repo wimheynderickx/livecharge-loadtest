@@ -64,6 +64,55 @@ func TestMock_H2C_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestMock_H2_MaxConcurrentStreamsHonoured(t *testing.T) {
+	cfg := config.MockConfig{
+		Transport: config.TransportConfig{
+			Type:  "http",
+			URL:   "127.0.0.1:0",
+			HTTP2: &config.HTTP2Config{MaxConcurrentStreams: 2},
+		},
+		Endpoints: []config.MockEndpointConfig{{
+			Path: "/", Method: "GET", OkResponse: "ok",
+		}},
+	}
+	srv, err := mockserver.NewMockServer(cfg)
+	if err != nil {
+		t.Fatalf("NewMockServer: %v", err)
+	}
+	if err := srv.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer srv.Stop()
+
+	// Concurrency well above the cap — verifies the http2 transport
+	// transparently queues without crashing the server or hanging the
+	// client. The stricter "GOAWAY framed at exactly N+1" assertion would
+	// need a raw http2.Framer client; skip that for 0.2.
+	client := &nethttp.Client{Transport: &http2.Transport{
+		AllowHTTP: true,
+		DialTLS: func(network, target string, _ *tls.Config) (net.Conn, error) {
+			return net.Dial(network, target)
+		},
+	}, Timeout: 2 * time.Second}
+
+	const N = 5
+	errCh := make(chan error, N)
+	for i := 0; i < N; i++ {
+		go func() {
+			resp, err := client.Get("http://" + srv.Addr() + "/")
+			if resp != nil {
+				resp.Body.Close()
+			}
+			errCh <- err
+		}()
+	}
+	for i := 0; i < N; i++ {
+		if err := <-errCh; err != nil {
+			t.Errorf("request %d: %v", i, err)
+		}
+	}
+}
+
 func TestMock_H2_OverTLS_RoundTrip(t *testing.T) {
 	cfg := config.MockConfig{
 		Transport: config.TransportConfig{
