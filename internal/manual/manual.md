@@ -11,6 +11,7 @@
 
 - **Live TUI dashboard** to dynamically interact with your testcases — start, stop, resume, restart, add and remove scenarios on the fly.
 - **Multi-protocol transport** — NATS and HTTP/HTTPS with `none`, `userpass`, HTTP Basic, and JWT Bearer auth.
+- **HTTP/2 client** — drive endpoints over h2c (`h2c://`) or h2-over-TLS (`https://` with ALPN). Force h1.1 over HTTPS via `[transport].http2 = false`.
 - **Multi-step sessions** with JSON / header / status-code extraction and predicate-driven conditional flow.
 - **Expression predicates** via `op = "expr"` — write boolean expressions over the response body, session vars, and scenario context using [expr-lang/expr](https://github.com/expr-lang/expr).
 - **Sub-millisecond latency measurement** using HDR histograms with configurable buckets (auto or fully manual edges).
@@ -362,6 +363,42 @@ For HTTP/HTTPS, `url` is the base URL. Each step's `path` is appended to it:
 type = "https"
 url  = "https://ocs.internal:8443"
 ```
+
+### 5.2.1 Protocol selection
+
+The client picks an HTTP protocol from the URL scheme:
+
+| Scheme | Behaviour |
+| --- | --- |
+| `http://host:port/...` | HTTP/1.1 (default) |
+| `h2c://host:port/...` | HTTP/2 over plain TCP, prior knowledge |
+| `https://host:port/...` | TLS, ALPN negotiates `h2` or `http/1.1` (server picks) |
+
+Force HTTP/1.1 over HTTPS with `http2 = false`:
+
+```toml
+[transport]
+type  = "http"
+url   = "https://api.example.com"
+http2 = false   # advertise only http/1.1 in ALPN
+```
+
+#### TLS knobs
+
+```toml
+[transport.tls]
+insecure_skip_verify = false   # default false; true for self-signed certs
+ca_file              = ""      # extra PEM bundle on top of system roots
+server_name          = ""      # SNI override; defaults to URL hostname
+```
+
+`insecure_skip_verify = true` emits one stderr warning at scenario startup (`WARN: TLS verification disabled ...`) so it never goes unnoticed in CI logs.
+
+#### Conflicts validated at startup
+
+- `h2c://` URL with `http2 = false` → rejected (the flag has no effect).
+- `[transport.tls]` on a non-`https://` URL → rejected (silently meaningless).
+- `ca_file` pointing at a non-existent path → rejected with the file error surfaced verbatim.
 
 ### 5.3 `[context]` — Variables
 
@@ -1119,6 +1156,17 @@ current: 487   MAX: 512   AVG: 483
 - **MAX** — highest instantaneous rate ever recorded during this run
 - **AVG** — lifetime average since the scenario started
 
+### PROTOCOL field
+
+The Overview tab shows the transport's wire-protocol label under the scenario description. It updates from "intent" to the negotiated value once the first response arrives:
+
+| State | HTTP form | NATS form |
+| --- | --- | --- |
+| Pre-first-response | `HTTP/2 (h2c, intent)` / `HTTPS (h2 preferred, negotiating)` / `HTTPS (h1.1 forced)` | `NATS (connecting)` |
+| Post-first-response | `HTTP/2 (h2)` / `HTTP/2 (h2c)` / `HTTP/1.1 (negotiated to h1.1)` / `HTTP/1.1` | `NATS 2.10` (version from server INFO) |
+
+The "negotiated to h1.1" form makes ALPN misconfiguration visible at a glance — if you wired up `https://` expecting HTTP/2 but the server only offered h1.1 in its ALPN list, the field shows that immediately.
+
 ### Sidebar Totals
 
 When multiple scenarios are running, the bottom of the sidebar shows aggregate totals across
@@ -1553,6 +1601,10 @@ loadtest run charge-flow.toml --no-mail
   inbox is empty, check the recipient's spam folder; the default
   `noreply@livecharge.local` From: address is suspicious to many providers.
   Set a real `--mail-from` for production use.
+
+### Why are my HTTPS requests using HTTP/1.1?
+
+Check the Overview tab's PROTOCOL field. If it reads `HTTP/1.1 (negotiated to h1.1)`, the server didn't advertise `h2` in ALPN. If it reads `HTTPS (h1.1 forced)`, you set `http2 = false`.
 
 ### Why was my expr predicate rejected at startup?
 
