@@ -105,3 +105,9 @@ func (t *Transport) Close() error {
 	}
 	return nil
 }
+
+// Protocol returns a placeholder string until Task 6 wires the real
+// server-version capture.
+func (t *Transport) Protocol() string {
+	return "NATS (connecting)"
+}

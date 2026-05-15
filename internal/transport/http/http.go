@@ -132,3 +132,9 @@ func (t *Transport) Close() error {
 	}
 	return nil
 }
+
+// Protocol returns a placeholder string until Task 4 wires the real
+// tracker. Keeps the package compiling while the interface is in flux.
+func (t *Transport) Protocol() string {
+	return "HTTP/1.1 (intent)"
+}
