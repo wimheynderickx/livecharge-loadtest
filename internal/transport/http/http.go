@@ -29,6 +29,8 @@ type Transport struct {
 	// preBuiltAuth caches the value of the Authorization header so we don't
 	// rebuild the same Basic/Bearer string on every request.
 	preBuiltAuth string
+
+	proto *protocolTracker // tracks observed wire protocol
 }
 
 // New constructs a Transport with a shared http.Client tuned for sustained
@@ -62,6 +64,8 @@ func New(cfg config.TransportConfig) (*Transport, error) {
 	default:
 		return nil, fmt.Errorf("http transport: unsupported auth type %q", cfg.Auth.Type)
 	}
+
+	t.proto = newProtocolTracker("HTTP/1.1 (intent)")
 
 	return t, nil
 }
@@ -103,6 +107,10 @@ func (t *Transport) Send(ctx context.Context, req transport.Request) (transport.
 	}
 	defer httpResp.Body.Close()
 
+	if httpResp.Proto != "" {
+		t.proto.Settle(httpResp.Proto)
+	}
+
 	body, err := io.ReadAll(httpResp.Body)
 	if err != nil {
 		return transport.Response{Latency: latency, StatusCode: httpResp.StatusCode},
@@ -133,8 +141,9 @@ func (t *Transport) Close() error {
 	return nil
 }
 
-// Protocol returns a placeholder string until Task 4 wires the real
-// tracker. Keeps the package compiling while the interface is in flux.
+// Protocol returns the current wire-protocol label. Before the first
+// response this is the intent string; after the first response it reflects
+// what the server actually negotiated.
 func (t *Transport) Protocol() string {
-	return "HTTP/1.1 (intent)"
+	return t.proto.Get()
 }
