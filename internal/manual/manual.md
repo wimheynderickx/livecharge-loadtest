@@ -20,6 +20,7 @@
 - **CSV export** with float-ms latency columns, predicate counts, and `{timestamp}` placeholders.
 - **Suite runs** — execute multiple scenarios concurrently from a single suite file.
 - **Built-in mock server** (NATS + HTTP) with configurable `fail_rate` and `no_answer_rate` for realistic failure simulation.
+- **Mock server HTTPS + HTTP/2** — `loadtest mock` serves TLS (auto-generated cert or user-supplied), HTTP/2 (h2c or h2 via ALPN), and per-endpoint chunked streaming responses.
 - **Post-run email notifications** over SMTP (STARTTLS + auth) with text, HTML, or `multipart/alternative` body, log attachments, and templated subject/body.
 - **Headless / CI mode** with structured logs and proper exit codes.
 - **Embedded operational manual** — view it from inside the TUI (`m`) or via `loadtest manual`.
@@ -860,6 +861,89 @@ path           = "/v1/charges"
 fail_rate      = 0.02
 no_answer_rate = 0.01
 ```
+
+### 7.1 Mock TLS
+
+A mock HTTP listener can serve HTTPS:
+
+```toml
+[transport]
+type = "http"
+url  = "localhost:8443"
+
+[transport.tls]
+enabled = true
+# Optional override — when both are set, the mock loads the pair from disk.
+# When both are empty, the mock generates a self-signed cert in memory.
+# cert_file = "/path/to/cert.pem"
+# key_file  = "/path/to/key.pem"
+```
+
+**Auto-generated cert behaviour:**
+
+- ECDSA P-256 key.
+- CN = `loadtest-mock`. SAN list: `localhost`, `127.0.0.1`, `::1`, `loadtest-mock`.
+- Valid from boot − 1 minute to boot + 24 hours.
+- Regenerated on every mock restart (no on-disk persistence in 0.2).
+
+**Startup-log forms:**
+
+```text
+mock: listening on https://127.0.0.1:8443  (TLS, auto-generated self-signed cert, valid 24h)
+mock: listening on https://127.0.0.1:8443  (TLS, cert=/path/to/cert.pem)
+```
+
+Clients connecting to the auto-generated cert must set
+`[transport.tls].insecure_skip_verify = true` on the scenario side.
+
+### 7.2 Mock HTTP/2 listener
+
+The presence of `[transport.http2]` (even when empty) turns HTTP/2 on for
+a mock listener. Combined with `[transport.tls].enabled = true`, ALPN
+negotiates `h2` or `http/1.1`; without TLS, the mock speaks h2c
+(cleartext HTTP/2 via prior knowledge).
+
+| TLS | `[transport.http2]` | Result                                       |
+| --- | ------------------- | -------------------------------------------- |
+| off | absent              | HTTP/1.1 plain TCP (default)                 |
+| off | present             | h2c — HTTP/2 cleartext via prior knowledge   |
+| on  | absent              | HTTPS, ALPN offers `http/1.1` only           |
+| on  | present             | HTTPS, ALPN offers both `h2` and `http/1.1`  |
+
+**Tunables (all optional, 0 = library default):**
+
+| Field                         | Range            | Maps to                                       |
+| ----------------------------- | ---------------- | --------------------------------------------- |
+| `max_concurrent_streams`      | 1 – 2³¹−1        | `http2.Server.MaxConcurrentStreams`           |
+| `initial_stream_window_size`  | 1 – 2³¹−1        | `http2.Server.MaxUploadBufferPerStream`       |
+| `initial_conn_window_size`    | ≥ stream window  | `http2.Server.MaxUploadBufferPerConnection`   |
+| `max_frame_size`              | 16384 – 16777215 | `http2.Server.MaxReadFrameSize`               |
+
+Worked examples: `mock/h2c-mock.toml` and `mock/h2-mock.toml`.
+
+### 7.3 Streaming endpoints
+
+Add `[endpoint.stream]` to a `[[endpoint]]` block to emit the OK response
+in chunks with a delay between each:
+
+```toml
+[[endpoint]]
+path        = "/v1/stream"
+method      = "GET"
+ok_response = "AAABBBCCC"
+
+  [endpoint.stream]
+  chunks   = 3        # split body into N roughly-equal slices
+  delay_ms = 25       # delay between chunks
+```
+
+- Works for both HTTP/1.1 (chunked transfer encoding) and HTTP/2
+  (multiple DATA frames).
+- `fail_response` is **always** sent as a single response — streaming
+  applies only to the OK branch.
+- `chunks = 1` is a valid toggle-off (single chunk, no delay).
+- `no_answer_rate` interacts cleanly: when the mock decides "no answer"
+  for a request, no chunks are sent.
 
 ---
 

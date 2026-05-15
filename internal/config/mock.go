@@ -57,4 +57,19 @@ type MockEndpointConfig struct {
 	// FailResponse is a template string for the failure reply.
 	// Namespace: .extracted.X.
 	FailResponse string `toml:"fail_response"`
+
+	// Stream, when non-nil, enables chunked streaming of OkResponse. The
+	// body is split into Chunks roughly-equal slices, each flushed with
+	// DelayMs between them.
+	Stream *StreamConfig `toml:"stream"`
+}
+
+// StreamConfig controls chunked streaming of an endpoint's OK response.
+// Applies only to the OK branch — FailResponse is always sent as one chunk.
+type StreamConfig struct {
+	// Chunks is the number of slices to split ok_response into. Must be >= 1.
+	Chunks int `toml:"chunks"`
+
+	// DelayMs is the delay between chunks in milliseconds. Must be >= 0.
+	DelayMs int `toml:"delay_ms"`
 }

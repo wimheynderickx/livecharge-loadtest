@@ -2,15 +2,19 @@ package mockserver
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
 	nethttp "net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	natsclient "github.com/nats-io/nats.go"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 
 	"livecharge/loadtest/internal/config"
 )
@@ -31,6 +35,10 @@ type MockServer struct {
 
 	// httpSrv is non-nil for HTTP mode.
 	httpSrv *nethttp.Server
+
+	// addr is the bound listener address after Start (host:port). Empty
+	// before Start. Tests that bind to :0 read this to discover the port.
+	addr string
 
 	mu      sync.Mutex
 	started bool
@@ -104,7 +112,7 @@ func (s *MockServer) startNATS() error {
 	for i, ep := range s.cfg.Endpoints {
 		h := s.handlers[i]
 		sub, err := conn.QueueSubscribe(ep.Subject, "loadtest-mock", func(msg *natsclient.Msg) {
-			reply, noAnswer, _ := h.Handle(msg.Data)
+			reply, noAnswer, _, _ := h.Handle(msg.Data)
 			if noAnswer {
 				// Simulate a server that received the request but never
 				// replied. The client's request will time out per its
@@ -124,10 +132,9 @@ func (s *MockServer) startNATS() error {
 }
 
 // startHTTP builds an http.ServeMux with one handler per endpoint and
-// starts an HTTP server in a background goroutine. The bind address is
-// taken from cfg.Transport.URL, which is a "host:port" string here (no
-// scheme prefix needed because the server doesn't know whether it's
-// behind TLS termination).
+// starts an HTTP server in a background goroutine. TLS is enabled when
+// transport.tls.enabled = true; the cert is loaded from disk if cert_file
+// and key_file are set, otherwise generated in memory.
 func (s *MockServer) startHTTP() error {
 	mux := nethttp.NewServeMux()
 	for i, ep := range s.cfg.Endpoints {
@@ -141,27 +148,124 @@ func (s *MockServer) startHTTP() error {
 
 	addr := stripScheme(s.cfg.Transport.URL)
 
-	// Fail fast if the port is busy by binding eagerly.
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("http bind %s: %w", addr, err)
 	}
+	s.addr = ln.Addr().String()
 
 	s.httpSrv = &nethttp.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
+	wantTLS := s.cfg.Transport.TLS != nil && s.cfg.Transport.TLS.Enabled
+	wantH2 := s.cfg.Transport.HTTP2 != nil
+
+	var h2srv *http2.Server
+	if wantH2 {
+		h2srv = buildH2Server(s.cfg.Transport.HTTP2)
+	}
+
+	if wantTLS {
+		tlsCfg, certSource, err := s.buildServerTLSConfig()
+		if err != nil {
+			ln.Close()
+			return err
+		}
+		s.httpSrv.TLSConfig = tlsCfg
+		if wantH2 {
+			// ConfigureServer rewrites TLSConfig.NextProtos to include "h2"
+			// so ALPN selects HTTP/2 when the client offers it.
+			if err := http2.ConfigureServer(s.httpSrv, h2srv); err != nil {
+				ln.Close()
+				return fmt.Errorf("configure h2 server: %w", err)
+			}
+		}
+		logTLSStartup(s.addr, certSource, wantH2)
+		tlsLn := tls.NewListener(ln, s.httpSrv.TLSConfig)
+		go func() { _ = s.httpSrv.Serve(tlsLn) }()
+		return nil
+	}
+
+	if wantH2 {
+		// h2c — wrap the handler so cleartext HTTP/2 prior-knowledge
+		// requests are recognised. HTTP/1.1 traffic on the same port still
+		// works because h2c.NewHandler falls through to the inner handler.
+		s.httpSrv.Handler = h2c.NewHandler(mux, h2srv)
+	}
+	logHTTPStartup(s.addr, wantH2)
 	go func() {
-		// Serve returns ErrServerClosed on a clean shutdown — we don't
-		// log it. Other errors are silent in v1; users notice them via
-		// connection failures in the load generator.
 		_ = s.httpSrv.Serve(ln)
 	}()
 	return nil
 }
 
+// buildH2Server maps our HTTP2Config tuning knobs onto http2.Server fields.
+// Zero values pass through as zero, which the http2 library treats as
+// "use library default".
+func buildH2Server(h *config.HTTP2Config) *http2.Server {
+	srv := &http2.Server{
+		MaxConcurrentStreams: uint32(h.MaxConcurrentStreams),
+		MaxReadFrameSize:     uint32(h.MaxFrameSize),
+	}
+	if h.InitialStreamWindowSize > 0 {
+		srv.MaxUploadBufferPerStream = int32(h.InitialStreamWindowSize)
+	}
+	if h.InitialConnWindowSize > 0 {
+		srv.MaxUploadBufferPerConnection = int32(h.InitialConnWindowSize)
+	}
+	return srv
+}
+
+// buildServerTLSConfig assembles the tls.Config for a TLS-enabled mock
+// listener. When cert_file+key_file are set it loads them; otherwise it
+// generates a self-signed cert in memory. The second return value is a
+// human-readable label for the startup log line.
+func (s *MockServer) buildServerTLSConfig() (*tls.Config, string, error) {
+	tcfg := s.cfg.Transport.TLS
+	if tcfg.CertFile != "" {
+		pair, err := LoadCertPair(tcfg.CertFile, tcfg.KeyFile)
+		if err != nil {
+			return nil, "", err
+		}
+		return &tls.Config{Certificates: []tls.Certificate{pair}}, "cert=" + tcfg.CertFile, nil
+	}
+	pair, err := GenerateSelfSignedCert()
+	if err != nil {
+		return nil, "", err
+	}
+	return &tls.Config{Certificates: []tls.Certificate{pair}}, "auto-generated self-signed cert, valid 24h", nil
+}
+
+func logTLSStartup(addr, certSource string, h2 bool) {
+	suffix := ""
+	if h2 {
+		suffix = " + HTTP/2 (h2 via ALPN)"
+	}
+	fmt.Fprintf(os.Stderr, "mock: listening on https://%s  (TLS, %s)%s\n", addr, certSource, suffix)
+}
+
+func logHTTPStartup(addr string, h2 bool) {
+	suffix := ""
+	if h2 {
+		suffix = "  (HTTP/2 cleartext, h2c)"
+	}
+	fmt.Fprintf(os.Stderr, "mock: listening on http://%s%s\n", addr, suffix)
+}
+
+// Addr returns the bound listener address (host:port) once Start has
+// completed. Empty before Start.
+func (s *MockServer) Addr() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.addr
+}
+
 // makeHTTPHandler wraps one mock Handler in an http.HandlerFunc.
+// When the endpoint has a [stream] block and the reply is the OK branch,
+// the body is flushed in N chunks with the configured inter-chunk delay.
+// FAIL replies are always sent as a single response.
 func makeHTTPHandler(method string, h *Handler) nethttp.HandlerFunc {
 	return func(w nethttp.ResponseWriter, r *nethttp.Request) {
 		if r.Method != method {
@@ -175,7 +279,7 @@ func makeHTTPHandler(method string, h *Handler) nethttp.HandlerFunc {
 		}
 		_ = r.Body.Close()
 
-		reply, noAnswer, err := h.Handle(body)
+		reply, noAnswer, isFail, err := h.Handle(body)
 		if err != nil {
 			w.WriteHeader(nethttp.StatusInternalServerError)
 			return
@@ -189,9 +293,27 @@ func makeHTTPHandler(method string, h *Handler) nethttp.HandlerFunc {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if !isFail && h.endpoint.Stream != nil {
+			if flusher, ok := w.(nethttp.Flusher); ok {
+				streamResponse(flushAdapter{w: w, f: flusher}, reply,
+					h.endpoint.Stream.Chunks, h.endpoint.Stream.DelayMs)
+				return
+			}
+			// Fall through when the response writer can't flush.
+		}
 		_, _ = w.Write(reply)
 	}
 }
+
+// flushAdapter pairs an http.ResponseWriter with its Flusher so that
+// streamResponse can hold a single value implementing FlushWriter.
+type flushAdapter struct {
+	w nethttp.ResponseWriter
+	f nethttp.Flusher
+}
+
+func (a flushAdapter) Write(p []byte) (int, error) { return a.w.Write(p) }
+func (a flushAdapter) Flush()                      { a.f.Flush() }
 
 // Stop shuts down whichever transport is active. Safe to call multiple times.
 func (s *MockServer) Stop() error {

@@ -24,7 +24,7 @@ func TestValidate_H2CWithHTTP2False_Rejected(t *testing.T) {
 	cfg := minimalScenario(t)
 	cfg.Transport.URL = "h2c://localhost:8080"
 	f := false
-	cfg.Transport.HTTP2 = &f
+	cfg.Transport.HTTP2Opt = &f
 	errs := Validate(cfg)
 	if len(errs) == 0 {
 		t.Fatal("expected error: http2=false has no effect with h2c://")
@@ -69,8 +69,8 @@ server_name          = "real.example.com"
 	if _, err := toml.Decode(src, &cfg); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if cfg.Transport.HTTP2 == nil || *cfg.Transport.HTTP2 {
-		t.Error("HTTP2 should decode as &false")
+	if cfg.Transport.HTTP2Opt == nil || *cfg.Transport.HTTP2Opt {
+		t.Error("HTTP2Opt should decode as &false")
 	}
 	if cfg.Transport.TLS == nil {
 		t.Fatal("TLS block should decode")
@@ -83,5 +83,29 @@ server_name          = "real.example.com"
 	}
 	if cfg.Transport.TLS.ServerName != "real.example.com" {
 		t.Errorf("ServerName = %q", cfg.Transport.TLS.ServerName)
+	}
+}
+
+func TestMockTLS_CertKeyPair(t *testing.T) {
+	src := `
+[transport]
+type = "http"
+url  = "localhost:8443"
+
+[transport.tls]
+cert_file = "/etc/ssl/cert.pem"
+key_file  = "/etc/ssl/key.pem"
+`
+	var c struct {
+		Transport TransportConfig `toml:"transport"`
+	}
+	if _, err := toml.Decode(src, &c); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if c.Transport.TLS == nil {
+		t.Fatal("TLS sub-table missing")
+	}
+	if c.Transport.TLS.CertFile != "/etc/ssl/cert.pem" || c.Transport.TLS.KeyFile != "/etc/ssl/key.pem" {
+		t.Errorf("CertFile=%q KeyFile=%q", c.Transport.TLS.CertFile, c.Transport.TLS.KeyFile)
 	}
 }

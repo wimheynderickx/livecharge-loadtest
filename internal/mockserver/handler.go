@@ -64,11 +64,15 @@ func NewHandler(endpoint config.MockEndpointConfig) (*Handler, error) {
 //  2. Otherwise extract configured fields from the request body.
 //  3. Roll for fail_rate; render the matching ok/fail template.
 //
+// isFail tells callers whether the reply came from the FAIL template, so
+// HTTP handlers can suppress streaming for failures (spec: FAIL is always
+// sent as a single response).
+//
 // A returned error means the template failed to render. NATS callers can
 // silently drop in that case; HTTP callers should respond 500.
-func (h *Handler) Handle(body []byte) (reply []byte, noAnswer bool, err error) {
+func (h *Handler) Handle(body []byte) (reply []byte, noAnswer bool, isFail bool, err error) {
 	if h.shouldDrop() {
-		return nil, true, nil
+		return nil, true, false, nil
 	}
 
 	extracted, exErr := template.ExtractBodyFields(body, h.extracts)
@@ -81,10 +85,10 @@ func (h *Handler) Handle(body []byte) (reply []byte, noAnswer bool, err error) {
 
 	if h.shouldFail() && h.failTmpl != nil {
 		b, err := h.failTmpl.RenderExtracted(template.NewExtracted(extracted))
-		return b, false, err
+		return b, false, true, err
 	}
 	b, err := h.okTmpl.RenderExtracted(template.NewExtracted(extracted))
-	return b, false, err
+	return b, false, false, err
 }
 
 // shouldDrop returns true with probability endpoint.NoAnswerRate.
