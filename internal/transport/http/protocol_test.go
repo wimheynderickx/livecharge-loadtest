@@ -1,6 +1,54 @@
 package http
 
-import "testing"
+import (
+	"testing"
+
+	"livecharge/loadtest/internal/config"
+)
+
+func TestIntent_PlainHTTP(t *testing.T) {
+	tr := mustNew(t, "http://localhost:8080", nil, nil)
+	if got := tr.Protocol(); got != "HTTP/1.1 (intent)" {
+		t.Errorf("intent for http:// = %q", got)
+	}
+}
+
+func TestIntent_H2C(t *testing.T) {
+	tr := mustNew(t, "h2c://localhost:8080", nil, nil)
+	if got := tr.Protocol(); got != "HTTP/2 (h2c, intent)" {
+		t.Errorf("intent for h2c:// = %q", got)
+	}
+}
+
+func TestIntent_HTTPS_DefaultH2(t *testing.T) {
+	tr := mustNew(t, "https://api.example.com", nil, nil)
+	if got := tr.Protocol(); got != "HTTPS (h2 preferred, negotiating)" {
+		t.Errorf("intent for https:// = %q", got)
+	}
+}
+
+func TestIntent_HTTPS_HTTP2False(t *testing.T) {
+	f := false
+	tr := mustNew(t, "https://api.example.com", &f, nil)
+	if got := tr.Protocol(); got != "HTTPS (h1.1 forced)" {
+		t.Errorf("intent for https:// + http2=false = %q", got)
+	}
+}
+
+func mustNew(t *testing.T, url string, http2 *bool, tls *config.TLSConfig) *Transport {
+	t.Helper()
+	tr, err := New(config.TransportConfig{
+		Type:  "http",
+		URL:   url,
+		Auth:  config.AuthConfig{Type: "none"},
+		HTTP2: http2,
+		TLS:   tls,
+	})
+	if err != nil {
+		t.Fatalf("New(%s): %v", url, err)
+	}
+	return tr
+}
 
 func TestProtocolTracker_Intent(t *testing.T) {
 	pt := newProtocolTracker("HTTP/1.1 (intent)")
