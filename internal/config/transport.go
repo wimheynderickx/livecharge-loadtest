@@ -12,12 +12,40 @@ type TransportConfig struct {
 	//   - For NATS:  e.g. "nats://localhost:4222"
 	//   - For HTTP:  e.g. "http://localhost:8080" (base URL; step paths are appended)
 	//   - For HTTPS: e.g. "https://api.example.com"
+	//   - For H2C:   e.g. "h2c://localhost:8080" (HTTP/2 over plain TCP, prior knowledge)
 	URL string `toml:"url"`
 
 	// Auth holds authentication settings. The Type field selects which
 	// other fields are meaningful (basic auth uses username/password,
 	// jwt uses token, etc.).
 	Auth AuthConfig `toml:"auth"`
+
+	// HTTP2, when explicitly set to false, disables HTTP/2 over ALPN for
+	// https:// URLs (forces h1.1). Unset (nil) keeps the default
+	// behaviour (h2 preferred). Has no effect on http:// or h2c://.
+	HTTP2 *bool `toml:"http2"`
+
+	// TLS holds optional TLS knobs for HTTPS scenarios. nil means
+	// "Go stdlib defaults" — verify against system roots, no SNI override.
+	TLS *TLSConfig `toml:"tls"`
+}
+
+// TLSConfig carries the TLS knobs a load-test scenario may need.
+// All fields are optional.
+type TLSConfig struct {
+	// InsecureSkipVerify disables certificate verification. Required
+	// when targeting servers with self-signed certs (e.g. the mock's
+	// auto-generated cert). Triggers a one-time stderr warning at
+	// scenario startup.
+	InsecureSkipVerify bool `toml:"insecure_skip_verify"`
+
+	// CAFile points to an additional PEM bundle to trust on top of the
+	// system roots. Empty means "system roots only".
+	CAFile string `toml:"ca_file"`
+
+	// ServerName overrides the SNI value sent during the TLS handshake.
+	// Defaults to the URL hostname.
+	ServerName string `toml:"server_name"`
 }
 
 // AuthConfig describes how to authenticate with the server.
