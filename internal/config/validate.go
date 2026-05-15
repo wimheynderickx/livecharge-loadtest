@@ -481,6 +481,58 @@ func ValidateMock(cfg *MockConfig) []ValidationError {
 		errs = append(errs, ValidationError{"endpoint", "mock must define at least one [[endpoint]]"})
 	}
 
+	// TLS cert/key pair.
+	if cfg.Transport.TLS != nil {
+		hasCert := cfg.Transport.TLS.CertFile != ""
+		hasKey := cfg.Transport.TLS.KeyFile != ""
+		if hasCert != hasKey {
+			errs = append(errs, ValidationError{
+				"transport.tls",
+				"cert_file and key_file must both be set or both empty",
+			})
+		}
+		if hasCert {
+			if _, err := os.Stat(cfg.Transport.TLS.CertFile); err != nil {
+				errs = append(errs, ValidationError{"transport.tls.cert_file", err.Error()})
+			}
+		}
+		if hasKey {
+			if _, err := os.Stat(cfg.Transport.TLS.KeyFile); err != nil {
+				errs = append(errs, ValidationError{"transport.tls.key_file", err.Error()})
+			}
+		}
+	}
+
+	// HTTP/2 tunable bounds.
+	if h := cfg.Transport.HTTP2; h != nil {
+		const maxInt31 = 1<<31 - 1
+		if h.MaxConcurrentStreams < 0 || h.MaxConcurrentStreams > maxInt31 {
+			errs = append(errs, ValidationError{
+				"transport.http2.max_concurrent_streams",
+				"must be between 1 and 2^31-1",
+			})
+		}
+		if h.InitialStreamWindowSize != 0 && (h.InitialStreamWindowSize < 1 || h.InitialStreamWindowSize > maxInt31) {
+			errs = append(errs, ValidationError{
+				"transport.http2.initial_stream_window_size",
+				"must be between 1 and 2^31-1",
+			})
+		}
+		if h.InitialConnWindowSize != 0 && h.InitialStreamWindowSize != 0 &&
+			h.InitialConnWindowSize < h.InitialStreamWindowSize {
+			errs = append(errs, ValidationError{
+				"transport.http2.initial_conn_window_size",
+				"initial_conn_window_size must be >= initial_stream_window_size",
+			})
+		}
+		if h.MaxFrameSize != 0 && (h.MaxFrameSize < 16384 || h.MaxFrameSize > 16777215) {
+			errs = append(errs, ValidationError{
+				"transport.http2.max_frame_size",
+				"max_frame_size must be between 16384 and 16777215",
+			})
+		}
+	}
+
 	for i, ep := range cfg.Endpoints {
 		section := fmt.Sprintf("endpoint[%d]", i)
 		switch cfg.Transport.Type {
@@ -513,6 +565,18 @@ func ValidateMock(cfg *MockConfig) []ValidationError {
 				section + ".fail_response",
 				"must be set when fail_rate > 0",
 			})
+		}
+		if ep.Stream != nil {
+			if ep.Stream.Chunks < 1 {
+				errs = append(errs, ValidationError{
+					section + ".stream.chunks", "chunks must be >= 1",
+				})
+			}
+			if ep.Stream.DelayMs < 0 {
+				errs = append(errs, ValidationError{
+					section + ".stream.delay_ms", "delay_ms must be >= 0",
+				})
+			}
 		}
 	}
 

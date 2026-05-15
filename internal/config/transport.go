@@ -47,9 +47,26 @@ type TransportConfig struct {
 	TLS *TLSConfig `toml:"tls"`
 }
 
-// HTTP2Config carries HTTP/2 tuning parameters for the [transport.http2] table.
+// HTTP2Config carries HTTP/2 tuning parameters for the [transport.http2]
+// table. Most fields apply to the mock server side; MaxConcurrentStreams is
+// also meaningful on the client (we surface it for symmetry, even though
+// the Go http2.Transport does not currently honour it).
 type HTTP2Config struct {
+	// MaxConcurrentStreams caps the number of concurrent streams per
+	// connection. 0 = library default.
 	MaxConcurrentStreams int `toml:"max_concurrent_streams"`
+
+	// InitialStreamWindowSize sets SETTINGS_INITIAL_WINDOW_SIZE.
+	// Must fit in [1, 2^31-1]. 0 = library default.
+	InitialStreamWindowSize int `toml:"initial_stream_window_size"`
+
+	// InitialConnWindowSize sets the connection-level flow-control window.
+	// Must be >= InitialStreamWindowSize. 0 = library default.
+	InitialConnWindowSize int `toml:"initial_conn_window_size"`
+
+	// MaxFrameSize sets SETTINGS_MAX_FRAME_SIZE.
+	// Valid range: [16384, 16777215]. 0 = library default.
+	MaxFrameSize int `toml:"max_frame_size"`
 }
 
 // UnmarshalTOML implements toml.Unmarshaler. It handles the dual-shape http2
