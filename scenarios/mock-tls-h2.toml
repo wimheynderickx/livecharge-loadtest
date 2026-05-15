@@ -1,0 +1,40 @@
+# Sanity scenario: end-to-end TLS + HTTP/2 against the mock.
+#
+# Run:
+#   ./bin/loadtest mock --config mock/h2-mock.toml &
+#   ./bin/loadtest run  --config scenarios/mock-tls-h2.toml
+
+[scenario]
+name        = "mock-tls-h2"
+description = "Verify the loadtest mock can serve TLS + HTTP/2 and the client speaks h2."
+
+[transport]
+type = "http"
+url  = "https://localhost:8443"
+
+[transport.auth]
+type = "none"
+
+[transport.tls]
+insecure_skip_verify = true   # mock's auto-generated cert is self-signed
+
+[load]
+rate             = 50
+total_messages   = 100
+concurrency      = 5
+response_timeout = "2s"
+
+[metrics]
+percentiles = [50, 95, 99]
+
+[[step]]
+name     = "create"
+method   = "POST"
+path     = "/v1/charges"
+template = """{ "amount": 100 }"""
+
+  [[step.predicate]]
+  name      = "ok"
+  op        = "expr"
+  value     = 'status == 200 && body.status == "created"'
+  next_step = ""
