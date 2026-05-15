@@ -111,8 +111,8 @@ func redecodeTOML(raw interface{}, dst interface{}) error {
 	return err
 }
 
-// TLSConfig carries the TLS knobs a load-test scenario may need.
-// All fields are optional.
+// TLSConfig carries TLS knobs shared by scenarios (client side) and mock
+// servers (server side). Fields are optional unless noted.
 type TLSConfig struct {
 	// InsecureSkipVerify disables certificate verification. Required
 	// when targeting servers with self-signed certs (e.g. the mock's
@@ -127,6 +127,16 @@ type TLSConfig struct {
 	// ServerName overrides the SNI value sent during the TLS handshake.
 	// Defaults to the URL hostname.
 	ServerName string `toml:"server_name"`
+
+	// Enabled is mock-only: when true the mock binds a TLS listener.
+	// Ignored on the client side (the client uses the URL scheme).
+	Enabled bool `toml:"enabled"`
+
+	// CertFile and KeyFile are mock-only: when both set the mock loads
+	// the cert+key pair from disk. When both empty the mock generates a
+	// self-signed cert in memory. Setting only one is a config error.
+	CertFile string `toml:"cert_file"`
+	KeyFile  string `toml:"key_file"`
 }
 
 // AuthConfig describes how to authenticate with the server.
