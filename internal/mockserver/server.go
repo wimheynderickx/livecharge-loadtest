@@ -112,7 +112,7 @@ func (s *MockServer) startNATS() error {
 	for i, ep := range s.cfg.Endpoints {
 		h := s.handlers[i]
 		sub, err := conn.QueueSubscribe(ep.Subject, "loadtest-mock", func(msg *natsclient.Msg) {
-			reply, noAnswer, _ := h.Handle(msg.Data)
+			reply, noAnswer, _, _ := h.Handle(msg.Data)
 			if noAnswer {
 				// Simulate a server that received the request but never
 				// replied. The client's request will time out per its
@@ -263,6 +263,9 @@ func (s *MockServer) Addr() string {
 }
 
 // makeHTTPHandler wraps one mock Handler in an http.HandlerFunc.
+// When the endpoint has a [stream] block and the reply is the OK branch,
+// the body is flushed in N chunks with the configured inter-chunk delay.
+// FAIL replies are always sent as a single response.
 func makeHTTPHandler(method string, h *Handler) nethttp.HandlerFunc {
 	return func(w nethttp.ResponseWriter, r *nethttp.Request) {
 		if r.Method != method {
@@ -276,7 +279,7 @@ func makeHTTPHandler(method string, h *Handler) nethttp.HandlerFunc {
 		}
 		_ = r.Body.Close()
 
-		reply, noAnswer, err := h.Handle(body)
+		reply, noAnswer, isFail, err := h.Handle(body)
 		if err != nil {
 			w.WriteHeader(nethttp.StatusInternalServerError)
 			return
@@ -290,9 +293,27 @@ func makeHTTPHandler(method string, h *Handler) nethttp.HandlerFunc {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if !isFail && h.endpoint.Stream != nil {
+			if flusher, ok := w.(nethttp.Flusher); ok {
+				streamResponse(flushAdapter{w: w, f: flusher}, reply,
+					h.endpoint.Stream.Chunks, h.endpoint.Stream.DelayMs)
+				return
+			}
+			// Fall through when the response writer can't flush.
+		}
 		_, _ = w.Write(reply)
 	}
 }
+
+// flushAdapter pairs an http.ResponseWriter with its Flusher so that
+// streamResponse can hold a single value implementing FlushWriter.
+type flushAdapter struct {
+	w nethttp.ResponseWriter
+	f nethttp.Flusher
+}
+
+func (a flushAdapter) Write(p []byte) (int, error) { return a.w.Write(p) }
+func (a flushAdapter) Flush()                      { a.f.Flush() }
 
 // Stop shuts down whichever transport is active. Safe to call multiple times.
 func (s *MockServer) Stop() error {
