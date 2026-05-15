@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"livecharge/loadtest/internal/config"
+	"livecharge/loadtest/internal/engine/predicate"
 	"livecharge/loadtest/internal/metrics"
 	"livecharge/loadtest/internal/template"
 	"livecharge/loadtest/internal/transport"
@@ -55,6 +57,15 @@ type Runner struct {
 	// callback is fired on a dedicated goroutine so a slow handler can't
 	// stall the actual generator startup.
 	onStart func()
+
+	// exprCompiled holds per-step Compiled programs for op=expr predicates.
+	// Stable for the runner's lifetime; populated in NewRunner.
+	exprCompiled map[string][]*predicate.Compiled
+
+	// scriptErr is set when one or more expr predicates failed to compile
+	// in NewRunner. The runner enters StateScriptError; Start refuses to
+	// run; the TUI / headless summary surface this message verbatim.
+	scriptErr string
 }
 
 // NewRunner builds a Runner ready to Start.
@@ -102,6 +113,44 @@ func NewRunner(loaded *config.LoadedScenario) (*Runner, error) {
 		maxLatencyUs,
 	)
 
+	// Compile all op=expr predicates eagerly. Any compile failure is
+	// accumulated; the runner enters StateScriptError and Start() refuses
+	// to proceed until the scenario TOML is fixed.
+	exprCompiled := make(map[string][]*predicate.Compiled, len(cfg.Steps))
+	var scriptErrs []string
+	for _, step := range cfg.Steps {
+		progs := make([]*predicate.Compiled, len(step.Predicates))
+		for i, p := range step.Predicates {
+			if p.Op != "expr" {
+				continue
+			}
+			prog, err := predicate.Compile(p.Value)
+			if err != nil {
+				scriptErrs = append(scriptErrs, fmt.Sprintf("step %q predicate %q: %v", step.Name, p.Name, err))
+				continue
+			}
+			col.Logf("expr compiled: step=%q predicate=%q expr=%s",
+				step.Name, p.Name, truncate(p.Value, 80))
+			progs[i] = prog
+		}
+		exprCompiled[step.Name] = progs
+	}
+
+	scriptErr := strings.Join(scriptErrs, "; ")
+	initState := StateIdle
+	if len(scriptErrs) > 0 {
+		initState = StateScriptError
+	}
+
+	// Install the eval-error hook so runtime expr errors land in this
+	// scenario's log buffer. NOTE: OnEvalError is package-global, so when
+	// multiple runners coexist the last-wired runner's hook wins. This is
+	// acceptable for 0.2 — runtime expr errors are rare and the collector
+	// logging is "close enough" for debugging.
+	predicate.OnEvalError = func(predicateName string, err error) {
+		col.Logf("expr eval error: predicate=%q: %v", predicateName, err)
+	}
+
 	return &Runner{
 		cfg:          cfg,
 		md:           loaded.MetaData,
@@ -110,10 +159,29 @@ func NewRunner(loaded *config.LoadedScenario) (*Runner, error) {
 		collector:    col,
 		generator:    gen,
 		preCalc:      pre.Bodies,
-		state:        StateIdle,
+		state:        initState,
 		bucketEdges:  bucketEdges,
 		bucketLabels: bucketLabels,
+		exprCompiled: exprCompiled,
+		scriptErr:    scriptErr,
 	}, nil
+}
+
+// ScriptError returns the compile-error message when the runner is in
+// StateScriptError, or "" otherwise. Used by the TUI Overview tab and
+// the headless summary to surface compile failures.
+func (r *Runner) ScriptError() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.scriptErr
+}
+
+// truncate returns s capped at n bytes, with "…" appended if truncated.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 // Name returns the scenario name.
@@ -242,6 +310,10 @@ func (r *Runner) startInternal(resume bool) error {
 		r.mu.Unlock()
 		return fmt.Errorf("scenario %q has terminated (state=%s); call Restart to run again", r.cfg.Scenario.Name, r.state)
 	}
+	if r.state == StateScriptError {
+		r.mu.Unlock()
+		return fmt.Errorf("scenario %q cannot start — script error: %s", r.cfg.Scenario.Name, r.scriptErr)
+	}
 
 	r.collector.Start()
 	r.stopCollectorOnce = sync.Once{} // reset for this new lifecycle
@@ -268,7 +340,7 @@ func (r *Runner) startInternal(resume bool) error {
 	// inside the worker) keeps the LoadGenerator unaware of session
 	// internals.
 	sessionFn := func(ctx context.Context) {
-		s, err := newSession(r.cfg, r.transport, r.factory, r.preCalc, r.collector)
+		s, err := newSession(r.cfg, r.transport, r.factory, r.preCalc, r.collector, r.exprCompiled)
 		if err != nil {
 			r.collector.Submit(metrics.StepResult{Err: err})
 			return

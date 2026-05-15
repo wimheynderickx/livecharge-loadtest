@@ -299,17 +299,21 @@ func validateSteps(cfg *ScenarioConfig) []ValidationError {
 			psection := fmt.Sprintf("%s.predicate[%d]", section, j)
 			switch p.Op {
 			case "eq", "ne", "contains", "gt", "lt":
-				// ok
+				if p.Field == "" {
+					errs = append(errs, ValidationError{psection + ".field", "must not be empty"})
+				}
+			case "expr":
+				if strings.TrimSpace(p.Value) == "" {
+					errs = append(errs, ValidationError{psection + ".value", "value must not be empty when op=expr"})
+				}
+				// field is silently ignored with op=expr; surfaced via ValidateWarnings.
 			case "":
 				errs = append(errs, ValidationError{psection + ".op", "must be set"})
 			default:
 				errs = append(errs, ValidationError{
 					psection + ".op",
-					fmt.Sprintf("unknown op %q (valid: eq, ne, contains, gt, lt)", p.Op),
+					fmt.Sprintf("unknown op %q (valid: eq, ne, contains, gt, lt, expr)", p.Op),
 				})
-			}
-			if p.Field == "" {
-				errs = append(errs, ValidationError{psection + ".field", "must not be empty"})
 			}
 			if p.Name == "" {
 				errs = append(errs, ValidationError{psection + ".name", "must not be empty"})
@@ -387,6 +391,42 @@ func validateBuckets(m MetricsConfig) []ValidationError {
 	}
 
 	return errs
+}
+
+// Validate is a convenience wrapper around ValidateScenario for callers that
+// do not have a toml.MetaData (e.g. tests constructing configs programmatically).
+// It passes a zero MetaData, which is safe when cfg.Context is nil or empty.
+func Validate(cfg *ScenarioConfig) []ValidationError {
+	return ValidateScenario(cfg, toml.MetaData{})
+}
+
+// ValidationWarning is a non-fatal config issue. Surfaced by ValidateWarnings.
+// Validate() does not return these — they don't prevent the scenario from
+// starting, they just inform the user.
+type ValidationWarning struct {
+	Field   string
+	Message string
+}
+
+// ValidateWarnings collects warnings for a scenario config.
+//
+// Currently it covers: op=expr with field set (field is unused).
+// Add new warning types here as the language grows.
+func ValidateWarnings(cfg *ScenarioConfig) []ValidationWarning {
+	var warns []ValidationWarning
+	for i, s := range cfg.Steps {
+		section := fmt.Sprintf("step[%d]", i)
+		for j, p := range s.Predicates {
+			psection := fmt.Sprintf("%s.predicate[%d]", section, j)
+			if p.Op == "expr" && p.Field != "" {
+				warns = append(warns, ValidationWarning{
+					Field:   psection + ".field",
+					Message: "field is unused with op=expr (ignored)",
+				})
+			}
+		}
+	}
+	return warns
 }
 
 // ValidateMock checks a mock-server config.

@@ -7,6 +7,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
+	"livecharge/loadtest/internal/engine"
 	"livecharge/loadtest/internal/mail"
 	"livecharge/loadtest/internal/metrics"
 )
@@ -19,7 +20,18 @@ import (
 //  2. Throughput KPI row — MSG/SEC (current) / MAX / AVG
 //  3. Latency percentile list (one line per configured percentile)
 //  4. Progress bar (when [load] total_messages is set)
-func renderOverview(s metrics.Snapshot, mailStatus *mail.Status, width int) string {
+//
+// When the runner is in StateScriptError only a single red error line is
+// shown — the KPI blocks have no meaningful content in that state.
+func renderOverview(s metrics.Snapshot, runner *engine.Runner, mailStatus *mail.Status, width int) string {
+	if runner != nil && runner.State() == engine.StateScriptError {
+		msg := runner.ScriptError()
+		if msg == "" {
+			msg = "(no detail)"
+		}
+		return StyleErr.Render("SCRIPT ERROR — " + msg)
+	}
+
 	header := renderScenarioHeader(s, width)
 	counters := renderCounterRow(s)
 	throughput := renderThroughputRow(s)

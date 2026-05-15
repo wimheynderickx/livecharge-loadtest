@@ -12,6 +12,7 @@
 - **Live TUI dashboard** to dynamically interact with your testcases — start, stop, resume, restart, add and remove scenarios on the fly.
 - **Multi-protocol transport** — NATS and HTTP/HTTPS with `none`, `userpass`, HTTP Basic, and JWT Bearer auth.
 - **Multi-step sessions** with JSON / header / status-code extraction and predicate-driven conditional flow.
+- **Expression predicates** via `op = "expr"` — write boolean expressions over the response body, session vars, and scenario context using [expr-lang/expr](https://github.com/expr-lang/expr).
 - **Sub-millisecond latency measurement** using HDR histograms with configurable buckets (auto or fully manual edges).
 - **High Performance** as it can send thousands of messages per second.
 - **Realtime throughput stats** — current, peak, and lifetime-average msg/sec.
@@ -596,6 +597,138 @@ next_step = "confirm-charge"       # jump to this step name; "" = end session ea
 | `contains` | string contains substring |
 | `gt` | greater than (numeric) |
 | `lt` | less than (numeric) |
+| `expr` | An [expr-lang/expr](https://github.com/expr-lang/expr) expression evaluating to a boolean. Reads `status`, `headers`, `body`, `session`, and `ctx` namespaces directly. See the "Expression predicates" subsection below. |
+
+#### Expression predicates (`op = "expr"`)
+
+Set `op = "expr"` to write a boolean expression that has access to the
+full response. Example:
+
+```toml
+[[step.predicate]]
+name      = "amount-matches"
+op        = "expr"
+value     = 'body.amount == ctx.amount && status == 200'
+next_step = "confirm"
+```
+
+##### Quoting your expression in TOML
+
+Expressions almost always contain double-quoted string literals
+(`"OK"`). Use **TOML literal strings** (single quotes) for the `value`
+so internal `"` doesn't need escaping:
+
+```toml
+# Recommended.
+value = 'body.charges[0].status == "OK"'
+
+# Multi-line literal — for compound expressions.
+value = '''
+  status == 200
+  && body.code == "CREATED"
+  && session.chargeId != ""
+'''
+
+# Basic string — every internal " needs escaping.
+value = "body.charges[0].status == \"OK\""
+```
+
+Within the expression itself, expr-lang accepts double-quoted (`"..."`)
+and backtick raw (`` `...` ``) string literals. Single quotes inside
+the expression are not valid string delimiters in expr.
+
+##### Available namespaces
+
+| Namespace | Source | Type | Example |
+| --- | --- | --- | --- |
+| `status` | HTTP response status code | int | `status == 200` |
+| `headers` | response headers (last value per name) | `map[string]string` | `headers["Content-Type"] contains "json"` |
+| `body` | response body parsed as JSON (tree); raw string if not JSON | tree / string | `body.charges[0].status == "OK"` |
+| `session` | values from previous `[[step.extract]]` | `map[string]string` | `session.chargeId != ""` |
+| `ctx` | scenario `[context]` values | `map[string]string` | `body.amount == ctx.amount` |
+
+`[[step.extract]]` is now **optional** — within the current step's
+predicates you can read the response body directly via `body.*`.
+Extract only when a *later* step needs the value, or when you want a
+per-name latency histogram keyed on the extracted field.
+
+##### Permissive missing-variable resolution
+
+A reference to a missing path (e.g. `body.charges[3].id` when the array
+has length 2) resolves to the **zero value of the inferred type**:
+empty string for string operations, 0 for numeric, false for boolean.
+You don't need to guard expressions with existence checks.
+
+##### Runtime errors
+
+If an expression hits a runtime error (e.g. comparing a JSON object to
+an int directly), the predicate **does not match** (no `next_step`
+taken). The error is logged once per unique `(predicate, error)` pair
+per scenario lifetime — repeats are silenced. Scenarios never crash on
+expression errors.
+
+##### Built-in functions
+
+Full expr-lang defaults are available: arithmetic, comparison, logical,
+`in`, `contains`, `startsWith`, `endsWith`, `matches` (regex), `len`,
+string methods (`upper`, `lower`, `trim`, `split`, `replace`, ...),
+array predicates (`all`, `any`, `none`, `one`, `filter`, `map`,
+`count`, `sum`, `mean`, `median`, `sort`, `take`), numeric (`abs`,
+`ceil`, `floor`, `round`, `min`, `max`), date/time (`now`, `duration`).
+
+Loadtest-specific additions:
+
+| Function | Signature | Purpose |
+| --- | --- | --- |
+| `toInt(x)` | `any → int` | Explicit conversion. Returns 0 on failure (consistent with permissive rule). |
+| `toFloat(x)` | `any → float64` | Same for float. |
+| `toString(x)` | `any → string` | Same for string. |
+| `env(name)` | `string → string` | Reads an environment variable. Returns `""` when unset. |
+
+##### Compile errors
+
+Expressions are compiled **once at scenario start**. A syntactically
+invalid expression puts the runner in the `SCRIPT_ERROR` state; the
+TUI sidebar shows `SCRIPT ERR` and the Overview tab shows the compiler
+message verbatim. Healthy sibling scenarios in the same run are
+unaffected.
+
+##### Performance — when to prefer classic ops
+
+`op = "expr"` is roughly **6× slower per evaluation** than the classic
+ops (`eq | ne | contains | gt | lt`). Concretely on an Apple M-series
+laptop: `expr` evaluates around 670 ns/op vs. ~110 ns/op for `eq`,
+with extra map allocations per call (the permissive resolver clones
+the namespace maps). Compilation itself is ~10 µs/predicate at scenario
+start — paid once, never on the hot path.
+
+In practice the **network round-trip dominates** every scenario: a
+1 ms response makes the predicate cost noise. So for HTTP and NATS
+load tests the difference is invisible at the throughput level.
+
+When per-evaluation cost actually matters — typically synthetic
+local-only scenarios with sub-millisecond response times, or very
+high-rate runs (>100k req/s per worker) — **prefer the classic ops**.
+They stay in the language and are not deprecated. A common pattern is:
+
+```toml
+# Hot-path predicate — use classic eq for speed.
+[[step.predicate]]
+name      = "ok"
+op        = "eq"
+field     = "status"
+value     = "200"
+next_step = "next"
+
+# Cold-path or richer logic — expr is fine here.
+[[step.predicate]]
+name      = "amount-mismatch"
+op        = "expr"
+value     = 'body.amount != ctx.amount || status >= 400'
+next_step = ""
+```
+
+Mix freely — the dispatcher picks the right evaluator per predicate.
 
 ---
 
@@ -1420,3 +1553,10 @@ loadtest run charge-flow.toml --no-mail
   inbox is empty, check the recipient's spam folder; the default
   `noreply@livecharge.local` From: address is suspicious to many providers.
   Set a real `--mail-from` for production use.
+
+### Why was my expr predicate rejected at startup?
+
+Your expression failed to compile. The Overview tab shows the exact
+error from expr-lang; common causes are an unbalanced `(`, a missing
+right-hand side after an operator, or referencing a function that
+doesn't exist in the built-ins table above.

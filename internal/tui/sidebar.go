@@ -105,7 +105,15 @@ func renderSidebarRow(s metrics.Snapshot, selected bool) string {
 		prefix = "▶ "
 		style = StyleSelectedRow
 	}
-	header := style.Render(prefix + name)
+
+	// For SCRIPT_ERROR state render the name line in red with a clear prefix
+	// so the user can see at a glance which scenario has a compile error.
+	var header string
+	if s.StateName == "SCRIPT_ERROR" {
+		header = StyleErr.Render(prefix + "SCRIPT ERR " + name)
+	} else {
+		header = style.Render(prefix + name)
+	}
 
 	p99 := s.Percentiles[99]
 	return strings.Join([]string{
