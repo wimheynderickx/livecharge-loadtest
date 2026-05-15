@@ -103,7 +103,7 @@ func mustBuildTransport(t *testing.T, rawURL string, http2Flag *bool, tlsCfg *co
 	t.Helper()
 	tr, err := httptransport.New(config.TransportConfig{
 		Type: "http", URL: rawURL, Auth: config.AuthConfig{Type: "none"},
-		HTTP2: http2Flag, TLS: tlsCfg,
+		HTTP2Opt: http2Flag, TLS: tlsCfg,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

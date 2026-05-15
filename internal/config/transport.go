@@ -1,8 +1,19 @@
 package config
 
+import (
+	"bytes"
+	"fmt"
+
+	"github.com/BurntSushi/toml"
+)
+
 // TransportConfig is the [transport] block in a scenario or mock TOML file.
 // It tells loadtest which protocol to use (NATS or HTTP), the destination
 // URL, and how to authenticate.
+//
+// The http2 key is decoded by UnmarshalTOML because it is dual-shape: it can
+// be a scalar bool (http2 = false) stored in HTTP2Opt, or a config table
+// ([transport.http2] with tuning knobs) stored in HTTP2.
 type TransportConfig struct {
 	// Type selects the transport implementation.
 	// Valid values: "nats", "http", "https".
@@ -20,14 +31,84 @@ type TransportConfig struct {
 	// jwt uses token, etc.).
 	Auth AuthConfig `toml:"auth"`
 
-	// HTTP2, when explicitly set to false, disables HTTP/2 over ALPN for
-	// https:// URLs (forces h1.1). Unset (nil) keeps the default
-	// behaviour (h2 preferred). Has no effect on http:// or h2c://.
-	HTTP2 *bool `toml:"http2"`
+	// HTTP2Opt is set when the config uses the scalar form: http2 = false.
+	// false means "disable h2 ALPN for https://"; nil means use the default
+	// (h2 preferred). Has no effect on http:// or h2c://.
+	// Set by UnmarshalTOML; do not add a toml struct tag.
+	HTTP2Opt *bool
+
+	// HTTP2 is set when the config uses the table form: [transport.http2].
+	// It carries HTTP/2 server-tuning knobs. nil means "use defaults".
+	// Set by UnmarshalTOML; do not add a toml struct tag.
+	HTTP2 *HTTP2Config
 
 	// TLS holds optional TLS knobs for HTTPS scenarios. nil means
 	// "Go stdlib defaults" — verify against system roots, no SNI override.
 	TLS *TLSConfig `toml:"tls"`
+}
+
+// HTTP2Config carries HTTP/2 tuning parameters for the [transport.http2] table.
+type HTTP2Config struct {
+	MaxConcurrentStreams int `toml:"max_concurrent_streams"`
+}
+
+// UnmarshalTOML implements toml.Unmarshaler. It handles the dual-shape http2
+// key: a bool scalar (http2 = false) is stored in HTTP2Opt, while a config
+// table ([transport.http2]) is stored in HTTP2. All other fields are decoded
+// through a re-encode round-trip so that struct tags on sub-types remain
+// authoritative.
+func (tc *TransportConfig) UnmarshalTOML(data interface{}) error {
+	m, ok := data.(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("transport: expected TOML table, got %T", data)
+	}
+
+	if v, ok := m["type"].(string); ok {
+		tc.Type = v
+	}
+	if v, ok := m["url"].(string); ok {
+		tc.URL = v
+	}
+	if v, ok := m["auth"]; ok {
+		if err := redecodeTOML(v, &tc.Auth); err != nil {
+			return fmt.Errorf("transport.auth: %w", err)
+		}
+	}
+	if v, ok := m["tls"]; ok {
+		tc.TLS = new(TLSConfig)
+		if err := redecodeTOML(v, tc.TLS); err != nil {
+			return fmt.Errorf("transport.tls: %w", err)
+		}
+	}
+
+	if v, ok := m["http2"]; ok {
+		switch typed := v.(type) {
+		case bool:
+			tc.HTTP2Opt = &typed
+		case map[string]interface{}:
+			tc.HTTP2 = new(HTTP2Config)
+			if err := redecodeTOML(typed, tc.HTTP2); err != nil {
+				return fmt.Errorf("transport.http2: %w", err)
+			}
+		default:
+			return fmt.Errorf("transport.http2: expected bool or table, got %T", v)
+		}
+	}
+
+	return nil
+}
+
+// redecodeTOML re-encodes a raw TOML value (map[string]interface{} or scalar)
+// back to TOML bytes, then decodes those bytes into dst using dst's struct
+// tags. This keeps field-name strings authoritative in the struct definitions
+// rather than duplicated inside custom UnmarshalTOML methods.
+func redecodeTOML(raw interface{}, dst interface{}) error {
+	var buf bytes.Buffer
+	if err := toml.NewEncoder(&buf).Encode(raw); err != nil {
+		return err
+	}
+	_, err := toml.Decode(buf.String(), dst)
+	return err
 }
 
 // TLSConfig carries the TLS knobs a load-test scenario may need.

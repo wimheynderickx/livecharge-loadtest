@@ -80,7 +80,7 @@ func ValidateScenario(cfg *ScenarioConfig, md toml.MetaData) []ValidationError {
 		} else {
 			scheme := strings.ToLower(parsed.Scheme)
 
-			if scheme == "h2c" && cfg.Transport.HTTP2 != nil && !*cfg.Transport.HTTP2 {
+			if scheme == "h2c" && cfg.Transport.HTTP2Opt != nil && !*cfg.Transport.HTTP2Opt {
 				errs = append(errs, ValidationError{
 					"transport.http2",
 					"http2=false has no effect on h2c:// URLs; remove the scheme or the flag",

@@ -58,7 +58,7 @@ func New(cfg config.TransportConfig) (*Transport, error) {
 		return nil, fmt.Errorf("http transport: tls: %w", err)
 	}
 
-	wantH2 := cfg.HTTP2 == nil || *cfg.HTTP2 // default true
+	wantH2 := cfg.HTTP2Opt == nil || *cfg.HTTP2Opt // default true
 
 	t := &Transport{
 		baseURL: strings.TrimRight(cfg.URL, "/"),

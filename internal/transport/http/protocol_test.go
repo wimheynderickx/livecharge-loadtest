@@ -41,7 +41,7 @@ func mustNew(t *testing.T, url string, http2 *bool, tls *config.TLSConfig) *Tran
 		Type:  "http",
 		URL:   url,
 		Auth:  config.AuthConfig{Type: "none"},
-		HTTP2: http2,
+		HTTP2Opt: http2,
 		TLS:   tls,
 	})
 	if err != nil {

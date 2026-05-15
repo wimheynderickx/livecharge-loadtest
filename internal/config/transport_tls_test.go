@@ -24,7 +24,7 @@ func TestValidate_H2CWithHTTP2False_Rejected(t *testing.T) {
 	cfg := minimalScenario(t)
 	cfg.Transport.URL = "h2c://localhost:8080"
 	f := false
-	cfg.Transport.HTTP2 = &f
+	cfg.Transport.HTTP2Opt = &f
 	errs := Validate(cfg)
 	if len(errs) == 0 {
 		t.Fatal("expected error: http2=false has no effect with h2c://")
@@ -69,8 +69,8 @@ server_name          = "real.example.com"
 	if _, err := toml.Decode(src, &cfg); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if cfg.Transport.HTTP2 == nil || *cfg.Transport.HTTP2 {
-		t.Error("HTTP2 should decode as &false")
+	if cfg.Transport.HTTP2Opt == nil || *cfg.Transport.HTTP2Opt {
+		t.Error("HTTP2Opt should decode as &false")
 	}
 	if cfg.Transport.TLS == nil {
 		t.Fatal("TLS block should decode")
