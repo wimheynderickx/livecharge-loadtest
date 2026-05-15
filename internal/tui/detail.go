@@ -27,7 +27,7 @@ func renderDetail(active Tab, snap metrics.Snapshot, runner *engine.Runner, logB
 	var body string
 	switch active {
 	case TabOverview:
-		body = renderOverview(snap, mailStatus, width)
+		body = renderOverview(snap, runner, mailStatus, width)
 	case TabLatency:
 		body = renderLatency(runner, width)
 	case TabPredicates:

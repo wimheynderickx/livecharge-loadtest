@@ -1,0 +1,54 @@
+# Worked example: a two-step scenario using op=expr predicates.
+# Step 1 reads the response body via expr's `body.*` (no [[step.extract]]
+# needed). Step 2 chains via the predicate's next_step.
+
+[scenario]
+name        = "expr-predicates-example"
+description = "Demonstrates op=expr access to body, session, and ctx."
+
+[transport]
+type = "http"
+url  = "http://localhost:8080"
+
+[transport.auth]
+type = "none"
+
+[context.amount]
+type = "random_range"
+min  = 100
+max  = 999
+
+[load]
+rate             = 50
+total_messages   = 100
+concurrency      = 2
+response_timeout = "2s"
+
+[metrics]
+percentiles = [50, 99]
+
+[[step]]
+name     = "create"
+method   = "POST"
+path     = "/v1/charges"
+template = """{ "amount": {{.ctx.amount}} }"""
+
+  # No [[step.extract]] needed — expr reads body.id directly below.
+
+  [[step.predicate]]
+  name      = "created-ok"
+  op        = "expr"
+  value     = 'status == 200 && body.status == "created"'
+  next_step = "confirm"
+
+[[step]]
+name     = "confirm"
+method   = "GET"
+path     = "/v1/health"
+template = "{}"
+
+  [[step.predicate]]
+  name      = "healthy"
+  op        = "expr"
+  value     = 'status == 200'
+  next_step = ""

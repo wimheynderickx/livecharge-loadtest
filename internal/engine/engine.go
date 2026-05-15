@@ -13,6 +13,7 @@ const (
 	StateStopped
 	StateDone
 	StateError
+	StateScriptError // configuration is valid TOML but an expr predicate failed to compile; the runner cannot start.
 )
 
 // String returns the human-readable state name. Snapshot.StateName uses
@@ -30,6 +31,8 @@ func (s State) String() string {
 		return "DONE"
 	case StateError:
 		return "ERROR"
+	case StateScriptError:
+		return "SCRIPT_ERROR"
 	default:
 		return "UNKNOWN"
 	}

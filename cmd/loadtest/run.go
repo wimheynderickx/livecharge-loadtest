@@ -55,6 +55,13 @@ func newRunCmd() *cobra.Command {
 			return err
 		}
 
+		// Print non-fatal config warnings to stderr so users see them on every run.
+		for _, ls := range append(explicit, implicit...) {
+			for _, w := range ls.Warnings {
+				fmt.Fprintf(os.Stderr, "WARN %s: %s — %s\n", ls.Path, w.Field, w.Message)
+			}
+		}
+
 		// Pre-load the optional --mail-config. A bad path is NOT fatal:
 		// we want the rest of the run to proceed and surface the error
 		// in the TUI Overview tab so the user can clearly see why their
@@ -530,6 +537,11 @@ func runHeadless(scenarios []*config.LoadedScenario, logFile string, registry *m
 	defer stop()
 
 	for _, r := range runners {
+		// Skip runners that hit a script error (bad expr predicate) — they
+		// cannot start, but we still include them in the final summary.
+		if r.State() == engine.StateScriptError {
+			continue
+		}
 		if err := r.Start(); err != nil {
 			return fmt.Errorf("start %q: %w", r.Name(), err)
 		}
@@ -565,6 +577,11 @@ func waitAll(runners []*engine.Runner) <-chan struct{} {
 	ch := make(chan struct{})
 	var wg sync.WaitGroup
 	for _, r := range runners {
+		// Skip runners that are in a terminal state before starting
+		// (e.g., StateScriptError means they never entered the run loop).
+		if state := r.State(); state == engine.StateDone || state == engine.StateError || state == engine.StateScriptError {
+			continue
+		}
 		wg.Add(1)
 		go func(r *engine.Runner) {
 			defer wg.Done()
@@ -606,6 +623,14 @@ func printSummary(runners []*engine.Runner, logFile string) {
 	tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "SCENARIO\tSTATE\tSENT\tRECEIVED\tERRORS\tP50\tP95\tP99")
 	for _, r := range runners {
+		if r.State() == engine.StateScriptError {
+			msg := r.ScriptError()
+			if msg == "" {
+				msg = "(no detail)"
+			}
+			fmt.Fprintf(tw, "%s\tSCRIPT_ERROR\t — %s\n", r.Name(), msg)
+			continue
+		}
 		s := r.Snapshot()
 		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%s\t%s\t%s\n",
 			s.ScenarioName,

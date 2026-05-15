@@ -2,10 +2,12 @@ package engine
 
 import (
 	"context"
-	"strconv"
+	"encoding/json"
+	"strings"
 	"time"
 
 	"livecharge/loadtest/internal/config"
+	"livecharge/loadtest/internal/engine/predicate"
 	"livecharge/loadtest/internal/metrics"
 	"livecharge/loadtest/internal/template"
 	"livecharge/loadtest/internal/transport"
@@ -15,15 +17,16 @@ import (
 // session is created (and re-created) by the LoadGenerator for every iteration
 // so that .ctx and .session start fresh.
 type session struct {
-	cfg        *config.ScenarioConfig
-	transport  transport.Transport
-	factory    *template.ContextFactory
-	renderers  map[string]*template.Renderer // step name → renderer (built once)
-	hdrRenderers map[string]map[string]*template.Renderer // step → headerName → renderer
-	preCalc    map[string][]byte
-	stepByName map[string]int  // step name → index into cfg.Steps
-	collector  *metrics.Collector
-	timeoutAt  func(step config.StepConfig) time.Duration // resolves response_timeout per step
+	cfg          *config.ScenarioConfig
+	transport    transport.Transport
+	factory      *template.ContextFactory
+	renderers    map[string]*template.Renderer                    // step name → renderer (built once)
+	hdrRenderers map[string]map[string]*template.Renderer         // step → headerName → renderer
+	preCalc      map[string][]byte
+	stepByName   map[string]int                                   // step name → index into cfg.Steps
+	collector    *metrics.Collector
+	timeoutAt    func(step config.StepConfig) time.Duration       // resolves response_timeout per step
+	exprPrograms map[string][]*predicate.Compiled                 // step name → compiled expr programs
 }
 
 // newSession builds the per-session state. Most expensive work (template
@@ -35,6 +38,7 @@ func newSession(
 	factory *template.ContextFactory,
 	preCalc map[string][]byte,
 	collector *metrics.Collector,
+	exprPrograms map[string][]*predicate.Compiled,
 ) (*session, error) {
 	s := &session{
 		cfg:          cfg,
@@ -45,6 +49,7 @@ func newSession(
 		preCalc:      preCalc,
 		stepByName:   make(map[string]int, len(cfg.Steps)),
 		collector:    collector,
+		exprPrograms: exprPrograms,
 	}
 	for i, step := range cfg.Steps {
 		s.stepByName[step.Name] = i
@@ -138,11 +143,6 @@ func (s *session) run(ctx context.Context) {
 			return
 		}
 
-		// Stash the HTTP status code into session so predicates can match on it.
-		if resp.StatusCode != 0 {
-			sessionVals["status"] = strconv.Itoa(resp.StatusCode)
-		}
-
 		// Extracts populate .session for downstream steps and predicates.
 		for _, ex := range step.Extracts {
 			v, err := template.Extract(resp, ex.Path)
@@ -153,8 +153,25 @@ func (s *session) run(ctx context.Context) {
 			sessionVals[ex.Field] = v
 		}
 
-		// Evaluate predicates after all extracts are in.
-		result := template.Evaluate(step.Predicates, sessionVals)
+		// Parse the response body so expr predicates can traverse JSON
+		// directly via body.*. Non-JSON or parse errors fall back to the raw
+		// string — both forms are valid expr inputs.
+		var bodyAny any = string(resp.Body)
+		if ct, ok := resp.Headers["Content-Type"]; ok && strings.Contains(strings.ToLower(ct), "json") {
+			var v any
+			if err := json.Unmarshal(resp.Body, &v); err == nil {
+				bodyAny = v
+			}
+		}
+
+		predCtx := predicate.Context{
+			Status:  resp.StatusCode,
+			Headers: resp.Headers,
+			Body:    bodyAny,
+			Session: sessionVals,
+			Ctx:     tctx["ctx"].(map[string]any),
+		}
+		result := predicate.Evaluate(step.Predicates, s.exprPrograms[step.Name], predCtx)
 
 		s.collector.Submit(metrics.StepResult{
 			Latency:       resp.Latency,

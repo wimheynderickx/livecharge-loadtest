@@ -9,12 +9,18 @@ package http
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"io"
+	"net"
 	nethttp "net/http"
+	"net/url"
+	"os"
 	"strings"
 	"time"
+
+	"golang.org/x/net/http2"
 
 	"livecharge/loadtest/internal/config"
 	"livecharge/loadtest/internal/transport"
@@ -29,26 +35,89 @@ type Transport struct {
 	// preBuiltAuth caches the value of the Authorization header so we don't
 	// rebuild the same Basic/Bearer string on every request.
 	preBuiltAuth string
+
+	proto *protocolTracker // tracks observed wire protocol
 }
 
 // New constructs a Transport with a shared http.Client tuned for sustained
 // load: many idle conns per host, short keep-alive timeout to avoid stale
-// sockets, and a sensible read/write timeout.
+// sockets. The URL scheme selects the wire protocol:
+//
+//   - http://  → HTTP/1.1 over plain TCP
+//   - h2c://   → HTTP/2 prior-knowledge over plain TCP
+//   - https:// → ALPN-negotiated TLS (h2 preferred, h1.1 fallback)
 func New(cfg config.TransportConfig) (*Transport, error) {
-	tr := &nethttp.Transport{
-		MaxIdleConns:        200,
-		MaxIdleConnsPerHost: 100,
-		IdleConnTimeout:     30 * time.Second,
+	parsed, err := url.Parse(cfg.URL)
+	if err != nil {
+		return nil, fmt.Errorf("http transport: parse url: %w", err)
 	}
+	scheme := strings.ToLower(parsed.Scheme)
+
+	tlsCfg, err := buildTLSConfig(cfg.TLS)
+	if err != nil {
+		return nil, fmt.Errorf("http transport: tls: %w", err)
+	}
+
+	wantH2 := cfg.HTTP2 == nil || *cfg.HTTP2 // default true
+
 	t := &Transport{
-		client: &nethttp.Client{
-			Transport: tr,
-			// We rely on per-request context timeouts; the client-level
-			// timeout would cap every call regardless of step overrides.
-			Timeout: 0,
-		},
 		baseURL: strings.TrimRight(cfg.URL, "/"),
 		auth:    cfg.Auth,
+	}
+
+	switch scheme {
+	case "http":
+		t.client = &nethttp.Client{
+			Transport: &nethttp.Transport{
+				MaxIdleConns:        200,
+				MaxIdleConnsPerHost: 100,
+				IdleConnTimeout:     30 * time.Second,
+			},
+			Timeout: 0,
+		}
+		t.proto = newProtocolTracker("HTTP/1.1 (intent)")
+
+	case "h2c":
+		h2tr := &http2.Transport{
+			AllowHTTP: true,
+			DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, network, addr)
+			},
+		}
+		// Rewrite baseURL so step paths append to http:// (not h2c://).
+		t.baseURL = "http://" + parsed.Host + strings.TrimRight(parsed.Path, "/")
+		t.client = &nethttp.Client{Transport: h2tr, Timeout: 0}
+		t.proto = newProtocolTracker("HTTP/2 (h2c, intent)")
+
+	case "https":
+		if wantH2 {
+			std := &nethttp.Transport{
+				MaxIdleConns:        200,
+				MaxIdleConnsPerHost: 100,
+				IdleConnTimeout:     30 * time.Second,
+				TLSClientConfig:     tlsCfg,
+				ForceAttemptHTTP2:   true,
+			}
+			t.client = &nethttp.Client{Transport: std, Timeout: 0}
+			t.proto = newProtocolTracker("HTTPS (h2 preferred, negotiating)")
+		} else {
+			std := &nethttp.Transport{
+				MaxIdleConns:        200,
+				MaxIdleConnsPerHost: 100,
+				IdleConnTimeout:     30 * time.Second,
+				TLSClientConfig:     tlsCfg,
+				TLSNextProto:        map[string]func(string, *tls.Conn) nethttp.RoundTripper{},
+			}
+			t.client = &nethttp.Client{Transport: std, Timeout: 0}
+			t.proto = newProtocolTracker("HTTPS (h1.1 forced)")
+		}
+
+	default:
+		return nil, fmt.Errorf("http transport: unsupported URL scheme %q (want http, h2c, or https)", scheme)
+	}
+
+	if cfg.TLS != nil && cfg.TLS.InsecureSkipVerify {
+		fmt.Fprintf(os.Stderr, "WARN: TLS verification disabled for scenario via [transport.tls].insecure_skip_verify=true\n")
 	}
 
 	switch cfg.Auth.Type {
@@ -103,6 +172,10 @@ func (t *Transport) Send(ctx context.Context, req transport.Request) (transport.
 	}
 	defer httpResp.Body.Close()
 
+	if httpResp.Proto != "" {
+		t.proto.Settle(httpResp.Proto)
+	}
+
 	body, err := io.ReadAll(httpResp.Body)
 	if err != nil {
 		return transport.Response{Latency: latency, StatusCode: httpResp.StatusCode},
@@ -131,4 +204,11 @@ func (t *Transport) Close() error {
 		tr.CloseIdleConnections()
 	}
 	return nil
+}
+
+// Protocol returns the current wire-protocol label. Before the first
+// response this is the intent string; after the first response it reflects
+// what the server actually negotiated.
+func (t *Transport) Protocol() string {
+	return t.proto.Get()
 }

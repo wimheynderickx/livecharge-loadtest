@@ -64,6 +64,9 @@ type LoadedScenario struct {
 	// Path is the absolute path the file was loaded from. Used to resolve
 	// relative paths in CSV report destinations.
 	Path string
+	// Warnings are non-fatal config issues collected during load. The CLI
+	// prints these to stderr at startup so users see them on every run.
+	Warnings []ValidationWarning
 }
 
 // SuiteConfig is a suite TOML file that references multiple scenarios.

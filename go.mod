@@ -1,6 +1,6 @@
 module livecharge/loadtest
 
-go 1.22
+go 1.25.0
 
 require (
 	github.com/BurntSushi/toml v1.3.2
@@ -9,10 +9,12 @@ require (
 	github.com/charmbracelet/bubbletea v0.26.4
 	github.com/charmbracelet/glamour v0.7.0
 	github.com/charmbracelet/lipgloss v0.11.0
+	github.com/expr-lang/expr v1.17.8
 	github.com/mhale/smtpd v0.8.3
 	github.com/nats-io/nats.go v1.34.0
 	github.com/spf13/cobra v1.8.0
-	golang.org/x/term v0.20.0
+	golang.org/x/net v0.54.0
+	golang.org/x/term v0.43.0
 	golang.org/x/time v0.5.0
 )
 
@@ -47,9 +49,8 @@ require (
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/yuin/goldmark v1.5.4 // indirect
 	github.com/yuin/goldmark-emoji v1.0.2 // indirect
-	golang.org/x/crypto v0.18.0 // indirect
-	golang.org/x/net v0.17.0 // indirect
-	golang.org/x/sync v0.7.0 // indirect
-	golang.org/x/sys v0.20.0 // indirect
-	golang.org/x/text v0.14.0 // indirect
+	golang.org/x/crypto v0.51.0 // indirect
+	golang.org/x/sync v0.20.0 // indirect
+	golang.org/x/sys v0.44.0 // indirect
+	golang.org/x/text v0.37.0 // indirect
 )

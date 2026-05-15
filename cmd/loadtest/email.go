@@ -290,6 +290,11 @@ func wireScenarioMail(
 		return status, nil
 	}
 
+	// Promote the status out of Disabled so the Overview tab can show
+	// "what's wired up" — triggers + progress cadence — before any
+	// lifecycle event actually fires.
+	status.MarkConfigured(merged.Triggers(), merged.ReportInterval.Duration)
+
 	sender := mail.NewSender(merged)
 	// startedAt is the wall-clock moment of the first start/restart. It
 	// is rewritten by the OnStart handler on every fresh start so the
@@ -357,13 +362,20 @@ func wireScenarioMail(
 		}
 	})
 
-	// Lifecycle callback: fired on RUNNING → DONE or RUNNING → ERROR.
+	// Lifecycle callback: fired when the runner reaches a terminal state.
 	// Cancels any in-flight progress ticker so a scenario that finishes
 	// before its next report tick doesn't emit a stale "progress" email
 	// after the "done" email.
+	//
+	// The engine itself only emits StateDone today — the StateError
+	// constant exists but no engine code path assigns it. We therefore
+	// pick "done" vs "error" here from the final snapshot: when the
+	// scenario completed with errors that dominate (more errors than
+	// successful replies) we classify it as ERROR. With on=["done",
+	// "error"] exactly one of the two fires, matching the outcome.
 	runner.SetOnTerminal(func(state engine.State) {
 		registry.stopProgress(runner)
-		trigger := triggerNameForState(state)
+		trigger := chooseTerminalTrigger(runner, state)
 		if trigger == "" || !merged.FiresOn(trigger) {
 			return
 		}
@@ -419,18 +431,70 @@ func triggerNameForState(s engine.State) string {
 	return ""
 }
 
-// runProgressTicker fires a "progress" email every interval until ctx
-// is cancelled. Designed to be spawned in a goroutine from the OnStart
-// handler; the registry's stopProgress(runner) call (issued by
-// OnTerminal or by the scenario's OnRemove cleanup) cancels ctx so we
-// don't leak goroutines and a scenario that finishes between ticks
-// never gets a stray progress mail after its done/error mail.
+// chooseTerminalTrigger picks the lifecycle event name to fire when the
+// runner reaches a terminal state. The engine currently only ever sets
+// StateDone, so the choice between "done" and "error" comes from the
+// final snapshot rather than the state enum: when the run's error count
+// dominates we classify it as ERROR. The threshold (errors strictly
+// greater than received) is conservative — a few sporadic failures stay
+// classified as "done", but a scenario where most or all requests
+// failed surfaces as "error". Returns "" when the state isn't terminal
+// (defensive — the runner only invokes OnTerminal in terminal states).
+func chooseTerminalTrigger(runner *engine.Runner, state engine.State) string {
+	if name := triggerNameForState(state); name == "error" {
+		return name
+	} else if name == "" {
+		return ""
+	}
+	snap := runner.Snapshot()
+	if snap.Errors > 0 && snap.Errors > snap.Received {
+		return "error"
+	}
+	return "done"
+}
+
+// initialProgressDelay is the cap on how long we wait for the first
+// "progress" email. A user who configures a long report_interval (say
+// "5m") almost certainly still wants to know a quick scenario fired —
+// without this, a scenario that completes in 10 seconds would never
+// emit a progress mail despite the user opting in. So the first tick
+// fires at min(interval, initialProgressDelay); subsequent ticks
+// follow the user's configured interval as documented.
+const initialProgressDelay = 5 * time.Second
+
+// runProgressTicker fires "progress" emails for the lifetime of a
+// scenario run.
 //
-// The ticker also skips ticks while the runner is not in RUNNING state
-// — that handles the Stop/Resume case cleanly: a stopped scenario
-// silences the periodic emails until it's resumed, without us having
-// to tear down and rebuild the ticker each time.
+// Timing:
+//   - First fire:    min(interval, initialProgressDelay) after start.
+//                    Ensures short scenarios still see one progress mail.
+//   - Subsequent:    every interval, on a stock time.Ticker.
+//
+// Cancellation: ctx.Done returns the goroutine immediately. The
+// registry's stopProgress(runner) call (issued by OnTerminal or by
+// scenario removal cleanup) is what cancels ctx, so a run that finishes
+// between ticks never produces a stray progress mail after its
+// done/error mail.
+//
+// State check: ticks fire only while runner.State() == RUNNING. A
+// scenario paused with Stop silently skips ticks; Resume picks them
+// back up without us having to tear down and rebuild the ticker.
 func runProgressTicker(ctx context.Context, runner *engine.Runner, interval time.Duration, send func(string, engine.State)) {
+	firstDelay := interval
+	if firstDelay > initialProgressDelay {
+		firstDelay = initialProgressDelay
+	}
+
+	// Initial fire — completed once, then we fall into the interval loop.
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(firstDelay):
+	}
+	if runner.State() == engine.StateRunning {
+		send("progress", engine.StateRunning)
+	}
+
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {

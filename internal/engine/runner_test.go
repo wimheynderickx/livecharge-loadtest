@@ -282,3 +282,9 @@ template = "{}"
 		t.Errorf("OnStart should fire only on fresh Start, got %d calls (Resume should NOT fire it)", got)
 	}
 }
+
+func TestStateScriptError_String(t *testing.T) {
+	if got := StateScriptError.String(); got != "SCRIPT_ERROR" {
+		t.Fatalf("StateScriptError.String() = %q, want %q", got, "SCRIPT_ERROR")
+	}
+}

@@ -38,11 +38,13 @@ func LoadScenario(path string) (*LoadedScenario, error) {
 		return nil, &ValidationErrors{File: abs, Errors: errs}
 	}
 
-	return &LoadedScenario{
+	loaded := &LoadedScenario{
 		Config:   cfg,
 		MetaData: md,
 		Path:     abs,
-	}, nil
+	}
+	loaded.Warnings = ValidateWarnings(loaded.Config)
+	return loaded, nil
 }
 
 // LoadSuite reads a suite TOML file and resolves every referenced scenario

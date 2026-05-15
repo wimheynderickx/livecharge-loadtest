@@ -1,0 +1,31 @@
+# h2c — HTTP/2 cleartext (prior knowledge). Pairs with mock/h2c-mock.toml.
+#
+# Run:
+#   ./bin/loadtest mock --config mock/h2c-mock.toml &
+#   ./bin/loadtest run  --config scenarios/h2c-example.toml
+
+[scenario]
+name        = "h2c-example"
+description = "HTTP/2 cleartext via the new h2c:// scheme."
+
+[transport]
+type = "http"
+url  = "h2c://localhost:8080"
+
+[transport.auth]
+type = "none"
+
+[load]
+rate             = 50
+total_messages   = 200
+concurrency      = 5
+response_timeout = "2s"
+
+[metrics]
+percentiles = [50, 95, 99]
+
+[[step]]
+name     = "ping"
+method   = "GET"
+path     = "/v1/health"
+template = "{}"

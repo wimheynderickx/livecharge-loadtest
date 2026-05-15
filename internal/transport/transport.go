@@ -62,4 +62,11 @@ type Response struct {
 type Transport interface {
 	Send(ctx context.Context, req Request) (Response, error)
 	Close() error
+
+	// Protocol returns a short human label for the wire protocol the
+	// transport is actually using. Safe to call from any goroutine.
+	// Returns "(intent)" or "(negotiating)" suffixed labels before the
+	// first response settles the answer; after that it returns the
+	// observed value (e.g. "HTTP/2 (h2)", "HTTP/1.1", "NATS 2.10").
+	Protocol() string
 }

@@ -7,6 +7,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
+	"livecharge/loadtest/internal/engine"
 	"livecharge/loadtest/internal/mail"
 	"livecharge/loadtest/internal/metrics"
 )
@@ -19,7 +20,18 @@ import (
 //  2. Throughput KPI row — MSG/SEC (current) / MAX / AVG
 //  3. Latency percentile list (one line per configured percentile)
 //  4. Progress bar (when [load] total_messages is set)
-func renderOverview(s metrics.Snapshot, mailStatus *mail.Status, width int) string {
+//
+// When the runner is in StateScriptError only a single red error line is
+// shown — the KPI blocks have no meaningful content in that state.
+func renderOverview(s metrics.Snapshot, runner *engine.Runner, mailStatus *mail.Status, width int) string {
+	if runner != nil && runner.State() == engine.StateScriptError {
+		msg := runner.ScriptError()
+		if msg == "" {
+			msg = "(no detail)"
+		}
+		return StyleErr.Render("SCRIPT ERROR — " + msg)
+	}
+
 	header := renderScenarioHeader(s, width)
 	counters := renderCounterRow(s)
 	throughput := renderThroughputRow(s)
@@ -36,15 +48,19 @@ func renderOverview(s metrics.Snapshot, mailStatus *mail.Status, width int) stri
 	return strings.Join(parts, "\n")
 }
 
-// renderMailRow renders a single line summarising the post-run email
-// state. Returns "" when email is disabled for this scenario so the
-// Overview tab doesn't show a stray row in the "no email configured" case.
+// renderMailRow renders the Overview tab's email block. Returns "" when
+// email is disabled for this scenario.
 //
-// State → colour:
+// Two lines are produced:
 //
-//	Pending  muted
-//	Sent     green (ColorOK)
-//	Failed   red (ColorError)
+//  1. Config line — "EMAIL  on: start, progress (every 10s), done, error"
+//     The most-recently-fired trigger is highlighted so the user can see
+//     which event the status line below belongs to.
+//  2. Status line — only when a send has been attempted. Shows pending /
+//     sent / failed coloured appropriately, with the trigger reason in
+//     parentheses.
+//
+// The "configured but no send yet" case shows only line 1.
 func renderMailRow(status *mail.Status) string {
 	if status == nil {
 		return ""
@@ -54,32 +70,76 @@ func renderMailRow(status *mail.Status) string {
 		return ""
 	}
 	label := StyleKpiLabel.Render("EMAIL")
+	cfg := formatMailTriggers(snap)
+	stat := formatMailStatus(snap)
+
+	// Indent the status line so it visually attaches under the config
+	// line rather than reading as a sibling KPI.
+	if stat == "" {
+		return label + "  " + cfg
+	}
+	pad := strings.Repeat(" ", lipgloss.Width(label)+2)
+	return label + "  " + cfg + "\n" + pad + stat
+}
+
+// formatMailTriggers renders the configured trigger list with the
+// progress cadence inlined ("progress (every 10s)") and the last-fired
+// trigger highlighted in bold accent so the status line below has a
+// visual anchor.
+func formatMailTriggers(snap mail.Snapshot) string {
+	if len(snap.Triggers) == 0 {
+		return StyleMuted.Render("(no triggers configured)")
+	}
+	active := lipgloss.NewStyle().Bold(true).Foreground(ColorAccent)
+	parts := make([]string, 0, len(snap.Triggers))
+	for _, t := range snap.Triggers {
+		label := t
+		if t == "progress" && snap.ReportInterval > 0 {
+			label = "progress (every " + snap.ReportInterval.String() + ")"
+		}
+		if t == snap.Trigger {
+			label = active.Render(label)
+		}
+		parts = append(parts, label)
+	}
+	return StyleMuted.Render("on: ") + strings.Join(parts, ", ")
+}
+
+// formatMailStatus renders the per-send state. Returns "" when the
+// status hasn't progressed past Configured (no fire yet).
+func formatMailStatus(snap mail.Snapshot) string {
+	suffix := ""
+	if snap.Trigger != "" {
+		suffix = " (" + snap.Trigger + ")"
+	}
 	switch snap.State {
 	case mail.StatePending:
-		return label + "  " + StyleMuted.Render("📧 sending to "+snap.Recipient+"…")
+		return StyleMuted.Render("📧 sending" + suffix + " to " + snap.Recipient + "…")
 	case mail.StateSent:
 		ok := lipgloss.NewStyle().Foreground(ColorOK)
-		return label + "  " + ok.Render("📧 sent to "+snap.Recipient+" at "+snap.FinishAt.Format("15:04:05"))
+		return ok.Render("📧 sent" + suffix + " to " + snap.Recipient + " at " + snap.FinishAt.Format("15:04:05"))
 	case mail.StateFailed:
 		errMsg := "unknown error"
 		if snap.Err != nil {
 			errMsg = snap.Err.Error()
 		}
-		return label + "  " + StyleErr.Render("📧 FAILED — "+errMsg)
+		return StyleErr.Render("📧 FAILED" + suffix + " — " + errMsg)
 	}
 	return ""
 }
 
-// renderScenarioHeader shows the full scenario name (bold) and description on
-// a single line each, so the user always sees the complete text even when the
-// sidebar truncates the name.
+// renderScenarioHeader shows the full scenario name (bold), description, and
+// PROTOCOL label on separate lines.
 func renderScenarioHeader(s metrics.Snapshot, width int) string {
 	name := lipgloss.NewStyle().Bold(true).Foreground(ColorAccent).Render(s.ScenarioName)
-	if s.ScenarioDescription == "" {
-		return name
+	parts := []string{name}
+	if s.ScenarioDescription != "" {
+		parts = append(parts, StyleMuted.Render(s.ScenarioDescription))
 	}
-	desc := StyleMuted.Render(s.ScenarioDescription)
-	return name + "\n" + desc
+	if s.Protocol != "" {
+		parts = append(parts, StyleKpiLabel.Render("PROTOCOL")+"  "+s.Protocol)
+	}
+	return strings.Join(parts, "\n")
 }
 
 // renderCounterRow renders the SENT / RECEIVED / ERRORS boxes.

@@ -11,7 +11,9 @@
 
 - **Live TUI dashboard** to dynamically interact with your testcases — start, stop, resume, restart, add and remove scenarios on the fly.
 - **Multi-protocol transport** — NATS and HTTP/HTTPS with `none`, `userpass`, HTTP Basic, and JWT Bearer auth.
+- **HTTP/2 client** — drive endpoints over h2c (`h2c://`) or h2-over-TLS (`https://` with ALPN). Force h1.1 over HTTPS via `[transport].http2 = false`.
 - **Multi-step sessions** with JSON / header / status-code extraction and predicate-driven conditional flow.
+- **Expression predicates** via `op = "expr"` — write boolean expressions over the response body, session vars, and scenario context using [expr-lang/expr](https://github.com/expr-lang/expr).
 - **Sub-millisecond latency measurement** using HDR histograms with configurable buckets (auto or fully manual edges).
 - **High Performance** as it can send thousands of messages per second.
 - **Realtime throughput stats** — current, peak, and lifetime-average msg/sec.
@@ -362,6 +364,42 @@ type = "https"
 url  = "https://ocs.internal:8443"
 ```
 
+### 5.2.1 Protocol selection
+
+The client picks an HTTP protocol from the URL scheme:
+
+| Scheme | Behaviour |
+| --- | --- |
+| `http://host:port/...` | HTTP/1.1 (default) |
+| `h2c://host:port/...` | HTTP/2 over plain TCP, prior knowledge |
+| `https://host:port/...` | TLS, ALPN negotiates `h2` or `http/1.1` (server picks) |
+
+Force HTTP/1.1 over HTTPS with `http2 = false`:
+
+```toml
+[transport]
+type  = "http"
+url   = "https://api.example.com"
+http2 = false   # advertise only http/1.1 in ALPN
+```
+
+#### TLS knobs
+
+```toml
+[transport.tls]
+insecure_skip_verify = false   # default false; true for self-signed certs
+ca_file              = ""      # extra PEM bundle on top of system roots
+server_name          = ""      # SNI override; defaults to URL hostname
+```
+
+`insecure_skip_verify = true` emits one stderr warning at scenario startup (`WARN: TLS verification disabled ...`) so it never goes unnoticed in CI logs.
+
+#### Conflicts validated at startup
+
+- `h2c://` URL with `http2 = false` → rejected (the flag has no effect).
+- `[transport.tls]` on a non-`https://` URL → rejected (silently meaningless).
+- `ca_file` pointing at a non-existent path → rejected with the file error surfaced verbatim.
+
 ### 5.3 `[context]` — Variables
 
 Context variables are available as `{{.ctx.name}}` in step templates. They are evaluated
@@ -596,6 +634,138 @@ next_step = "confirm-charge"       # jump to this step name; "" = end session ea
 | `contains` | string contains substring |
 | `gt` | greater than (numeric) |
 | `lt` | less than (numeric) |
+| `expr` | An [expr-lang/expr](https://github.com/expr-lang/expr) expression evaluating to a boolean. Reads `status`, `headers`, `body`, `session`, and `ctx` namespaces directly. See the "Expression predicates" subsection below. |
+
+#### Expression predicates (`op = "expr"`)
+
+Set `op = "expr"` to write a boolean expression that has access to the
+full response. Example:
+
+```toml
+[[step.predicate]]
+name      = "amount-matches"
+op        = "expr"
+value     = 'body.amount == ctx.amount && status == 200'
+next_step = "confirm"
+```
+
+##### Quoting your expression in TOML
+
+Expressions almost always contain double-quoted string literals
+(`"OK"`). Use **TOML literal strings** (single quotes) for the `value`
+so internal `"` doesn't need escaping:
+
+```toml
+# Recommended.
+value = 'body.charges[0].status == "OK"'
+
+# Multi-line literal — for compound expressions.
+value = '''
+  status == 200
+  && body.code == "CREATED"
+  && session.chargeId != ""
+'''
+
+# Basic string — every internal " needs escaping.
+value = "body.charges[0].status == \"OK\""
+```
+
+Within the expression itself, expr-lang accepts double-quoted (`"..."`)
+and backtick raw (`` `...` ``) string literals. Single quotes inside
+the expression are not valid string delimiters in expr.
+
+##### Available namespaces
+
+| Namespace | Source | Type | Example |
+| --- | --- | --- | --- |
+| `status` | HTTP response status code | int | `status == 200` |
+| `headers` | response headers (last value per name) | `map[string]string` | `headers["Content-Type"] contains "json"` |
+| `body` | response body parsed as JSON (tree); raw string if not JSON | tree / string | `body.charges[0].status == "OK"` |
+| `session` | values from previous `[[step.extract]]` | `map[string]string` | `session.chargeId != ""` |
+| `ctx` | scenario `[context]` values | `map[string]string` | `body.amount == ctx.amount` |
+
+`[[step.extract]]` is now **optional** — within the current step's
+predicates you can read the response body directly via `body.*`.
+Extract only when a *later* step needs the value, or when you want a
+per-name latency histogram keyed on the extracted field.
+
+##### Permissive missing-variable resolution
+
+A reference to a missing path (e.g. `body.charges[3].id` when the array
+has length 2) resolves to the **zero value of the inferred type**:
+empty string for string operations, 0 for numeric, false for boolean.
+You don't need to guard expressions with existence checks.
+
+##### Runtime errors
+
+If an expression hits a runtime error (e.g. comparing a JSON object to
+an int directly), the predicate **does not match** (no `next_step`
+taken). The error is logged once per unique `(predicate, error)` pair
+per scenario lifetime — repeats are silenced. Scenarios never crash on
+expression errors.
+
+##### Built-in functions
+
+Full expr-lang defaults are available: arithmetic, comparison, logical,
+`in`, `contains`, `startsWith`, `endsWith`, `matches` (regex), `len`,
+string methods (`upper`, `lower`, `trim`, `split`, `replace`, ...),
+array predicates (`all`, `any`, `none`, `one`, `filter`, `map`,
+`count`, `sum`, `mean`, `median`, `sort`, `take`), numeric (`abs`,
+`ceil`, `floor`, `round`, `min`, `max`), date/time (`now`, `duration`).
+
+Loadtest-specific additions:
+
+| Function | Signature | Purpose |
+| --- | --- | --- |
+| `toInt(x)` | `any → int` | Explicit conversion. Returns 0 on failure (consistent with permissive rule). |
+| `toFloat(x)` | `any → float64` | Same for float. |
+| `toString(x)` | `any → string` | Same for string. |
+| `env(name)` | `string → string` | Reads an environment variable. Returns `""` when unset. |
+
+##### Compile errors
+
+Expressions are compiled **once at scenario start**. A syntactically
+invalid expression puts the runner in the `SCRIPT_ERROR` state; the
+TUI sidebar shows `SCRIPT ERR` and the Overview tab shows the compiler
+message verbatim. Healthy sibling scenarios in the same run are
+unaffected.
+
+##### Performance — when to prefer classic ops
+
+`op = "expr"` is roughly **6× slower per evaluation** than the classic
+ops (`eq | ne | contains | gt | lt`). Concretely on an Apple M-series
+laptop: `expr` evaluates around 670 ns/op vs. ~110 ns/op for `eq`,
+with extra map allocations per call (the permissive resolver clones
+the namespace maps). Compilation itself is ~10 µs/predicate at scenario
+start — paid once, never on the hot path.
+
+In practice the **network round-trip dominates** every scenario: a
+1 ms response makes the predicate cost noise. So for HTTP and NATS
+load tests the difference is invisible at the throughput level.
+
+When per-evaluation cost actually matters — typically synthetic
+local-only scenarios with sub-millisecond response times, or very
+high-rate runs (>100k req/s per worker) — **prefer the classic ops**.
+They stay in the language and are not deprecated. A common pattern is:
+
+```toml
+# Hot-path predicate — use classic eq for speed.
+[[step.predicate]]
+name      = "ok"
+op        = "eq"
+field     = "status"
+value     = "200"
+next_step = "next"
+
+# Cold-path or richer logic — expr is fine here.
+[[step.predicate]]
+name      = "amount-mismatch"
+op        = "expr"
+value     = 'body.amount != ctx.amount || status >= 400'
+next_step = ""
+```
+
+Mix freely — the dispatcher picks the right evaluator per predicate.
 
 ---
 
@@ -714,6 +884,13 @@ Set credentials in a shared `mail-config.toml`, the recipient list in the
 scenario, and override the subject on the command line for a one-off run.
 Each layer is optional; you can configure everything in any one of them.
 
+**Exception — `report_interval`:** progress-mail cadence is inherently
+scenario-specific (a soak test wants minutes between progress mails, a
+smoke test wants seconds), so the scenario's `report_interval` wins over
+the shared `mail-config.toml`. The file value only fills in when the
+scenario didn't set one. CLI still wins over both, as for every other
+field. This is the only field with inverted precedence.
+
 The SMTP password also reads from the `LOADTEST_SMTP_PASS` environment
 variable when no `smtp_pass` or `--mail-smtp-pass` is set — handy for CI.
 
@@ -763,9 +940,9 @@ existing configs keep their behaviour. Any combination is allowed:
 | Trigger | Fires when… | Notes |
 | --- | --- | --- |
 | `start` | The scenario transitions IDLE → RUNNING from a fresh `Start()` or `Restart()`. | **Not** fired on `Resume()` (the scenario continues a prior run). The email reports `state = RUNNING`, sent and received counters at 0, no latency yet. |
-| `progress` | Every `report_interval` while the scenario is RUNNING. | Requires `report_interval > 0`. The ticker pauses during STOPPED state and resumes on Resume. **Cancelled the moment the scenario reaches DONE or ERROR** — a run that finishes before the next tick gets no stale progress email. |
-| `done` | The scenario reaches its `total_messages` / `duration` limit. | Fired once. |
-| `error` | The scenario terminates with a fatal transport failure. | Fired once. Mutually exclusive with `done` for a given run. |
+| `progress` | First fire at `min(report_interval, 5s)` after start so short scenarios get at least one progress email; subsequent fires every `report_interval` while the scenario is RUNNING. | Requires `report_interval > 0`. The ticker pauses during STOPPED state and resumes on Resume. **Cancelled the moment the scenario reaches a terminal state** — a run that finishes between ticks gets no stale progress email after its done/error mail. |
+| `done` | The scenario reaches its `total_messages` / `duration` limit **with mostly-successful results**. | Fired once. |
+| `error` | The scenario reaches its limit but errors dominate (errors > received). | Fired once. Mutually exclusive with `done` for a given run — the email feature classifies the final outcome based on the snapshot. |
 
 **`report_interval`** is required when `progress` is in `on`; the
 loaded config is rejected at startup otherwise. A 5-minute cadence is
@@ -784,6 +961,24 @@ The built-in HTML template renders a coloured banner per trigger; the
 built-in text template prints a `=== Sent because: <trigger> ===`
 header so the recipient never has to guess which event the mail is
 about.
+
+#### 8.2.2 Overview-tab indicator
+
+When the email feature is on, the Overview tab shows a two-line summary
+under the latency block so you can see *what's wired up* without
+opening the scenario file:
+
+```text
+EMAIL  on: start, progress (every 10s), done, error
+         📧 sent (progress) to ops@example.com at 14:22:35
+```
+
+The first line lists the active triggers and the resolved progress
+cadence (handy when `--mail-config` overrides — or, for `report_interval`
+specifically, *doesn't* override — the scenario value). The
+most-recently-fired trigger is highlighted so the status line below
+always reads in context. The status line appears only after the first
+send fires.
 
 ### 8.3 `mail-config.toml` (shared file)
 
@@ -960,6 +1155,17 @@ current: 487   MAX: 512   AVG: 483
 - **current** — rolling 1-second window (refreshes every 100 ms)
 - **MAX** — highest instantaneous rate ever recorded during this run
 - **AVG** — lifetime average since the scenario started
+
+### PROTOCOL field
+
+The Overview tab shows the transport's wire-protocol label under the scenario description. It updates from "intent" to the negotiated value once the first response arrives:
+
+| State | HTTP form | NATS form |
+| --- | --- | --- |
+| Pre-first-response | `HTTP/2 (h2c, intent)` / `HTTPS (h2 preferred, negotiating)` / `HTTPS (h1.1 forced)` | `NATS (connecting)` |
+| Post-first-response | `HTTP/2 (h2)` / `HTTP/2 (h2c)` / `HTTP/1.1 (negotiated to h1.1)` / `HTTP/1.1` | `NATS 2.10` (version from server INFO) |
+
+The "negotiated to h1.1" form makes ALPN misconfiguration visible at a glance — if you wired up `https://` expecting HTTP/2 but the server only offered h1.1 in its ALPN list, the field shows that immediately.
 
 ### Sidebar Totals
 
@@ -1395,3 +1601,14 @@ loadtest run charge-flow.toml --no-mail
   inbox is empty, check the recipient's spam folder; the default
   `noreply@livecharge.local` From: address is suspicious to many providers.
   Set a real `--mail-from` for production use.
+
+### Why are my HTTPS requests using HTTP/1.1?
+
+Check the Overview tab's PROTOCOL field. If it reads `HTTP/1.1 (negotiated to h1.1)`, the server didn't advertise `h2` in ALPN. If it reads `HTTPS (h1.1 forced)`, you set `http2 = false`.
+
+### Why was my expr predicate rejected at startup?
+
+Your expression failed to compile. The Overview tab shows the exact
+error from expr-lang; common causes are an unbalanced `(`, a missing
+right-hand side after an operator, or referencing a function that
+doesn't exist in the built-ins table above.

@@ -25,8 +25,12 @@ func newValidateCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			switch {
 			case configPath != "":
-				if _, err := config.LoadScenario(configPath); err != nil {
+				loaded, err := config.LoadScenario(configPath)
+				if err != nil {
 					return err
+				}
+				for _, w := range loaded.Warnings {
+					fmt.Fprintf(cmd.ErrOrStderr(), "WARN %s: %s — %s\n", loaded.Path, w.Field, w.Message)
 				}
 				fmt.Println("OK")
 				return nil

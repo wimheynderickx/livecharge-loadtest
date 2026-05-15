@@ -1,0 +1,37 @@
+# h2 over TLS via ALPN. Pairs with mock/h2-mock.toml.
+#
+# The mock generates a self-signed cert on every restart, so
+# insecure_skip_verify=true is required.
+#
+# Run:
+#   ./bin/loadtest mock --config mock/h2-mock.toml &
+#   ./bin/loadtest run  --config scenarios/h2-tls-example.toml
+
+[scenario]
+name        = "h2-tls-example"
+description = "HTTP/2 over TLS with ALPN negotiation."
+
+[transport]
+type = "http"
+url  = "https://localhost:8443"
+
+[transport.auth]
+type = "none"
+
+[transport.tls]
+insecure_skip_verify = true   # mock's auto-generated cert is self-signed
+
+[load]
+rate             = 50
+total_messages   = 200
+concurrency      = 5
+response_timeout = "2s"
+
+[metrics]
+percentiles = [50, 95, 99]
+
+[[step]]
+name     = "ping"
+method   = "GET"
+path     = "/v1/health"
+template = "{}"

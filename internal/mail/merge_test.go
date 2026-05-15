@@ -84,6 +84,29 @@ func TestMerge_CLIBoolsExplicitlyDisable(t *testing.T) {
 	}
 }
 
+// TestMerge_ReportIntervalScenarioWins documents the one merge exception:
+// progress cadence is scenario-specific, so a scenario that sets
+// report_interval wins over the shared --mail-config file. The file value
+// is only used as a fallback when the scenario didn't set one.
+func TestMerge_ReportIntervalScenarioWins(t *testing.T) {
+	// 1. Scenario sets, file sets — scenario wins.
+	scenario := Config{Enabled: true, SMTPHost: "h", From: "a", To: []string{"b"},
+		ReportInterval: Duration{10 * time.Second}}
+	file := Config{ReportInterval: Duration{5 * time.Minute}}
+	out := Merge(scenario, file, Overrides{})
+	if out.ReportInterval.Duration != 10*time.Second {
+		t.Errorf("scenario report_interval should win, got %v", out.ReportInterval.Duration)
+	}
+
+	// 2. Scenario empty, file sets — file fills in.
+	scenario = Config{Enabled: true, SMTPHost: "h", From: "a", To: []string{"b"}}
+	file = Config{ReportInterval: Duration{5 * time.Minute}}
+	out = Merge(scenario, file, Overrides{})
+	if out.ReportInterval.Duration != 5*time.Minute {
+		t.Errorf("file report_interval should fill when scenario empty, got %v", out.ReportInterval.Duration)
+	}
+}
+
 func TestMerge_EnvVarFillsSMTPPass(t *testing.T) {
 	t.Setenv("LOADTEST_SMTP_PASS", "from-env")
 	out := Merge(Config{Enabled: true, SMTPHost: "h", From: "a", To: []string{"b"}}, Config{}, Overrides{})

@@ -121,6 +121,8 @@ func StateBadge(state string) string {
 		return lipgloss.NewStyle().Foreground(ColorOK).Render("✓ DONE")
 	case "ERROR":
 		return lipgloss.NewStyle().Foreground(ColorError).Render("✗ ERROR")
+	case "SCRIPT_ERROR":
+		return lipgloss.NewStyle().Foreground(ColorError).Render("✗ SCRIPT ERR")
 	case "IDLE":
 		return StyleMuted.Render("○ IDLE")
 	default:

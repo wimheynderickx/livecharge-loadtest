@@ -1,0 +1,58 @@
+# Mock HTTP/2 cleartext server (h2c, no TLS). Requires loadtest 0.2+ —
+# earlier releases do not speak HTTP/2.
+#
+# Clients reach this listener via the new `h2c://` URL scheme, e.g.
+#
+#   [transport]
+#   type = "http"
+#   url  = "h2c://localhost:8080"
+#
+# No TLS, no ALPN — HTTP/2 is used via prior knowledge.
+#
+# The [transport.http2] block exposes the same HTTP/2 tunables on the
+# mock side that real servers expose: max_concurrent_streams, the
+# initial flow-control windows, and max_frame_size. All four are
+# optional — when absent the Go http2 defaults apply.
+#
+# Per-endpoint `stream` block: when set, the mock emits the response
+# body in N chunks with `delay_ms` between chunks, simulating a slow
+# streaming backend. Useful for testing client streaming behaviour
+# under HTTP/2.
+#
+# Usage: loadtest mock --config mock/h2c-mock.toml
+
+[transport]
+type = "http"
+url  = "h2c://localhost:8080"
+
+[transport.auth]
+type = "none"
+
+[transport.http2]
+max_concurrent_streams      = 100        # default Go http2 = 100
+initial_stream_window_size  = 65535      # bytes per stream
+initial_conn_window_size    = 1048576    # bytes per connection
+max_frame_size              = 16384      # bytes; min 16384, max 16777215
+
+[[endpoint]]
+path           = "/v1/charges"
+method         = "POST"
+fail_rate      = 0.05
+no_answer_rate = 0.02
+ok_response    = """{ "id": "CHG-{{.extracted.amount}}", "status": "created" }"""
+fail_response  = """{ "error": "insufficient_funds" }"""
+
+  [[endpoint.extract]]
+  field = "amount"
+  path  = "amount"
+
+# Streaming endpoint example — emits the ok_response in 4 chunks with
+# 25ms between them so clients see real HTTP/2 DATA frames over time.
+[[endpoint]]
+path        = "/v1/stream"
+method      = "GET"
+ok_response = """{ "tick": 0 }\n{ "tick": 1 }\n{ "tick": 2 }\n{ "tick": 3 }\n"""
+
+  [endpoint.stream]
+  chunks   = 4
+  delay_ms = 25
