@@ -128,16 +128,18 @@ func formatMailStatus(snap mail.Snapshot) string {
 	return ""
 }
 
-// renderScenarioHeader shows the full scenario name (bold) and description on
-// a single line each, so the user always sees the complete text even when the
-// sidebar truncates the name.
+// renderScenarioHeader shows the full scenario name (bold), description, and
+// PROTOCOL label on separate lines.
 func renderScenarioHeader(s metrics.Snapshot, width int) string {
 	name := lipgloss.NewStyle().Bold(true).Foreground(ColorAccent).Render(s.ScenarioName)
-	if s.ScenarioDescription == "" {
-		return name
+	parts := []string{name}
+	if s.ScenarioDescription != "" {
+		parts = append(parts, StyleMuted.Render(s.ScenarioDescription))
 	}
-	desc := StyleMuted.Render(s.ScenarioDescription)
-	return name + "\n" + desc
+	if s.Protocol != "" {
+		parts = append(parts, StyleKpiLabel.Render("PROTOCOL")+"  "+s.Protocol)
+	}
+	return strings.Join(parts, "\n")
 }
 
 // renderCounterRow renders the SENT / RECEIVED / ERRORS boxes.

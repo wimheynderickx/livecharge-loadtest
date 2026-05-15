@@ -221,12 +221,23 @@ func (r *Runner) State() State {
 	return r.state
 }
 
+// Protocol returns the underlying transport's current protocol label.
+// Forwarded as-is to the TUI Overview field.
+func (r *Runner) Protocol() string {
+	if r.transport == nil {
+		return ""
+	}
+	return r.transport.Protocol()
+}
+
 // Snapshot exposes the current metrics with the state name attached.
 func (r *Runner) Snapshot() metrics.Snapshot {
 	r.mu.Lock()
 	st := r.state
 	r.mu.Unlock()
-	return r.collector.Snapshot(st.String(), r.cfg.Load.TotalMessages)
+	snap := r.collector.Snapshot(st.String(), r.cfg.Load.TotalMessages)
+	snap.Protocol = r.Protocol()
+	return snap
 }
 
 // Buckets exposes the global latency histogram aggregated into the

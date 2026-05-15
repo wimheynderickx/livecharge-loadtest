@@ -48,6 +48,11 @@ type Snapshot struct {
 	// Predicates maps each named predicate to its counters and per-name
 	// percentiles.
 	Predicates map[string]PredicateStats
+
+	// Protocol is the transport's current wire-protocol label, e.g.
+	// "HTTP/2 (h2)" or "NATS 2.10". Populated by the Runner; empty
+	// when the transport has no protocol notion.
+	Protocol string
 }
 
 // PredicateStats holds the per-predicate accounting.
