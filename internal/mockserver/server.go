@@ -2,10 +2,12 @@ package mockserver
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
 	nethttp "net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +33,10 @@ type MockServer struct {
 
 	// httpSrv is non-nil for HTTP mode.
 	httpSrv *nethttp.Server
+
+	// addr is the bound listener address after Start (host:port). Empty
+	// before Start. Tests that bind to :0 read this to discover the port.
+	addr string
 
 	mu      sync.Mutex
 	started bool
@@ -124,10 +130,9 @@ func (s *MockServer) startNATS() error {
 }
 
 // startHTTP builds an http.ServeMux with one handler per endpoint and
-// starts an HTTP server in a background goroutine. The bind address is
-// taken from cfg.Transport.URL, which is a "host:port" string here (no
-// scheme prefix needed because the server doesn't know whether it's
-// behind TLS termination).
+// starts an HTTP server in a background goroutine. TLS is enabled when
+// transport.tls.enabled = true; the cert is loaded from disk if cert_file
+// and key_file are set, otherwise generated in memory.
 func (s *MockServer) startHTTP() error {
 	mux := nethttp.NewServeMux()
 	for i, ep := range s.cfg.Endpoints {
@@ -141,17 +146,32 @@ func (s *MockServer) startHTTP() error {
 
 	addr := stripScheme(s.cfg.Transport.URL)
 
-	// Fail fast if the port is busy by binding eagerly.
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("http bind %s: %w", addr, err)
 	}
+	s.addr = ln.Addr().String()
 
 	s.httpSrv = &nethttp.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
+	wantTLS := s.cfg.Transport.TLS != nil && s.cfg.Transport.TLS.Enabled
+	if wantTLS {
+		tlsCfg, certSource, err := s.buildServerTLSConfig()
+		if err != nil {
+			ln.Close()
+			return err
+		}
+		s.httpSrv.TLSConfig = tlsCfg
+		logTLSStartup(s.addr, certSource)
+		tlsLn := tls.NewListener(ln, tlsCfg)
+		go func() { _ = s.httpSrv.Serve(tlsLn) }()
+		return nil
+	}
+
+	logHTTPStartup(s.addr)
 	go func() {
 		// Serve returns ErrServerClosed on a clean shutdown — we don't
 		// log it. Other errors are silent in v1; users notice them via
@@ -159,6 +179,42 @@ func (s *MockServer) startHTTP() error {
 		_ = s.httpSrv.Serve(ln)
 	}()
 	return nil
+}
+
+// buildServerTLSConfig assembles the tls.Config for a TLS-enabled mock
+// listener. When cert_file+key_file are set it loads them; otherwise it
+// generates a self-signed cert in memory. The second return value is a
+// human-readable label for the startup log line.
+func (s *MockServer) buildServerTLSConfig() (*tls.Config, string, error) {
+	tcfg := s.cfg.Transport.TLS
+	if tcfg.CertFile != "" {
+		pair, err := LoadCertPair(tcfg.CertFile, tcfg.KeyFile)
+		if err != nil {
+			return nil, "", err
+		}
+		return &tls.Config{Certificates: []tls.Certificate{pair}}, "cert=" + tcfg.CertFile, nil
+	}
+	pair, err := GenerateSelfSignedCert()
+	if err != nil {
+		return nil, "", err
+	}
+	return &tls.Config{Certificates: []tls.Certificate{pair}}, "auto-generated self-signed cert, valid 24h", nil
+}
+
+func logTLSStartup(addr, certSource string) {
+	fmt.Fprintf(os.Stderr, "mock: listening on https://%s  (TLS, %s)\n", addr, certSource)
+}
+
+func logHTTPStartup(addr string) {
+	fmt.Fprintf(os.Stderr, "mock: listening on http://%s\n", addr)
+}
+
+// Addr returns the bound listener address (host:port) once Start has
+// completed. Empty before Start.
+func (s *MockServer) Addr() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.addr
 }
 
 // makeHTTPHandler wraps one mock Handler in an http.HandlerFunc.
