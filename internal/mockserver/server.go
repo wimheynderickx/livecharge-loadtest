@@ -13,6 +13,8 @@ import (
 	"time"
 
 	natsclient "github.com/nats-io/nats.go"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 
 	"livecharge/loadtest/internal/config"
 )
@@ -158,6 +160,13 @@ func (s *MockServer) startHTTP() error {
 	}
 
 	wantTLS := s.cfg.Transport.TLS != nil && s.cfg.Transport.TLS.Enabled
+	wantH2 := s.cfg.Transport.HTTP2 != nil
+
+	var h2srv *http2.Server
+	if wantH2 {
+		h2srv = buildH2Server(s.cfg.Transport.HTTP2)
+	}
+
 	if wantTLS {
 		tlsCfg, certSource, err := s.buildServerTLSConfig()
 		if err != nil {
@@ -165,20 +174,48 @@ func (s *MockServer) startHTTP() error {
 			return err
 		}
 		s.httpSrv.TLSConfig = tlsCfg
-		logTLSStartup(s.addr, certSource)
-		tlsLn := tls.NewListener(ln, tlsCfg)
+		if wantH2 {
+			// ConfigureServer rewrites TLSConfig.NextProtos to include "h2"
+			// so ALPN selects HTTP/2 when the client offers it.
+			if err := http2.ConfigureServer(s.httpSrv, h2srv); err != nil {
+				ln.Close()
+				return fmt.Errorf("configure h2 server: %w", err)
+			}
+		}
+		logTLSStartup(s.addr, certSource, wantH2)
+		tlsLn := tls.NewListener(ln, s.httpSrv.TLSConfig)
 		go func() { _ = s.httpSrv.Serve(tlsLn) }()
 		return nil
 	}
 
-	logHTTPStartup(s.addr)
+	if wantH2 {
+		// h2c — wrap the handler so cleartext HTTP/2 prior-knowledge
+		// requests are recognised. HTTP/1.1 traffic on the same port still
+		// works because h2c.NewHandler falls through to the inner handler.
+		s.httpSrv.Handler = h2c.NewHandler(mux, h2srv)
+	}
+	logHTTPStartup(s.addr, wantH2)
 	go func() {
-		// Serve returns ErrServerClosed on a clean shutdown — we don't
-		// log it. Other errors are silent in v1; users notice them via
-		// connection failures in the load generator.
 		_ = s.httpSrv.Serve(ln)
 	}()
 	return nil
+}
+
+// buildH2Server maps our HTTP2Config tuning knobs onto http2.Server fields.
+// Zero values pass through as zero, which the http2 library treats as
+// "use library default".
+func buildH2Server(h *config.HTTP2Config) *http2.Server {
+	srv := &http2.Server{
+		MaxConcurrentStreams: uint32(h.MaxConcurrentStreams),
+		MaxReadFrameSize:     uint32(h.MaxFrameSize),
+	}
+	if h.InitialStreamWindowSize > 0 {
+		srv.MaxUploadBufferPerStream = int32(h.InitialStreamWindowSize)
+	}
+	if h.InitialConnWindowSize > 0 {
+		srv.MaxUploadBufferPerConnection = int32(h.InitialConnWindowSize)
+	}
+	return srv
 }
 
 // buildServerTLSConfig assembles the tls.Config for a TLS-enabled mock
@@ -201,12 +238,20 @@ func (s *MockServer) buildServerTLSConfig() (*tls.Config, string, error) {
 	return &tls.Config{Certificates: []tls.Certificate{pair}}, "auto-generated self-signed cert, valid 24h", nil
 }
 
-func logTLSStartup(addr, certSource string) {
-	fmt.Fprintf(os.Stderr, "mock: listening on https://%s  (TLS, %s)\n", addr, certSource)
+func logTLSStartup(addr, certSource string, h2 bool) {
+	suffix := ""
+	if h2 {
+		suffix = " + HTTP/2 (h2 via ALPN)"
+	}
+	fmt.Fprintf(os.Stderr, "mock: listening on https://%s  (TLS, %s)%s\n", addr, certSource, suffix)
 }
 
-func logHTTPStartup(addr string) {
-	fmt.Fprintf(os.Stderr, "mock: listening on http://%s\n", addr)
+func logHTTPStartup(addr string, h2 bool) {
+	suffix := ""
+	if h2 {
+		suffix = "  (HTTP/2 cleartext, h2c)"
+	}
+	fmt.Fprintf(os.Stderr, "mock: listening on http://%s%s\n", addr, suffix)
 }
 
 // Addr returns the bound listener address (host:port) once Start has
