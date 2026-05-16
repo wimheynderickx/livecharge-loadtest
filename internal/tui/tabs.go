@@ -10,6 +10,10 @@ const (
 	TabLatency
 	TabPredicates
 	TabLog
+
+	// tabCount is the modulus for left/right tab cycling. Keep this last
+	// in the iota block so adding a tab updates the modulus automatically.
+	tabCount
 )
 
 // tabLabels lists each tab in display order. The key shown in brackets is

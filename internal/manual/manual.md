@@ -1222,27 +1222,18 @@ background. The **footer bar** shows the active keyboard shortcuts in the same c
 
 ### Overview Tab
 
-The Overview tab shows two rows of KPIs for the selected scenario:
+The Overview tab is stacked top-to-bottom:
 
-**Row 1 — Counters:**
-
-```text
-sent: 74,231   rcvd: 74,228   errors: 3   elapsed: 00:02:14
-```
-
-**Row 2 — Throughput (messages/second):**
-
-```text
-current: 487   MAX: 512   AVG: 483
-```
-
-- **current** — rolling 1-second window (refreshes every 100 ms)
-- **MAX** — highest instantaneous rate ever recorded during this run
-- **AVG** — lifetime average since the scenario started
+1. **Header** — scenario name in accent colour, description in white, source `.toml` path in muted grey.
+2. **Counter row** — `SENT`, `RECEIVED`, `ERRORS`, and `PROTOCOL`, all rendered as boxed KPIs so the wire protocol reads as a peer of the other counters.
+3. **Throughput row** — `MSG/SEC` (rolling 1-second window), `MAX /S` (peak observed during the run), `AVG /S` (lifetime average).
+4. **Latency** — one line per configured percentile.
+5. **Progress bar** — visible only when `[load] total_messages` is set.
+6. **Email status** — visible only when `[email]` is configured (see §8.6).
 
 ### PROTOCOL field
 
-The Overview tab shows the transport's wire-protocol label under the scenario description. It updates from "intent" to the negotiated value once the first response arrives:
+The `PROTOCOL` KPI shows the transport's wire-protocol label. It updates from "intent" to the negotiated value once the first response arrives:
 
 | State | HTTP form | NATS form |
 | --- | --- | --- |
@@ -1275,6 +1266,7 @@ avg/s:   1,987
 | `2` | Switch to Latency histogram tab |
 | `3` | Switch to Predicates table tab |
 | `4` | Switch to Log tab |
+| `←` / `→` | Cycle to the previous / next detail tab (wraps around) |
 | `s` | Stop the selected scenario (keeps metrics; can be resumed) |
 | `r` | Resume a stopped scenario (continues from where it left off) |
 | `R` | Restart the selected scenario (resets all counters and metrics) |

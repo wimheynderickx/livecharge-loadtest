@@ -16,14 +16,20 @@ import (
 //
 // Stack (top to bottom):
 //
-//  1. Counter KPI row    — SENT / RECEIVED / ERRORS
-//  2. Throughput KPI row — MSG/SEC (current) / MAX / AVG
-//  3. Latency percentile list (one line per configured percentile)
-//  4. Progress bar (when [load] total_messages is set)
+//  1. Header: scenario name (accent, bold), description (white), file
+//     path (muted grey).
+//  2. Counter KPI row    — SENT / RECEIVED / ERRORS / PROTOCOL
+//  3. Throughput KPI row — MSG/SEC (current) / MAX / AVG
+//  4. Latency percentile list (one line per configured percentile)
+//  5. Progress bar (when [load] total_messages is set)
+//
+// scenarioPath is the absolute filename the scenario was loaded from,
+// rendered under the description so users can tell two similarly-named
+// scenarios apart. Empty when the path is unknown.
 //
 // When the runner is in StateScriptError only a single red error line is
 // shown — the KPI blocks have no meaningful content in that state.
-func renderOverview(s metrics.Snapshot, runner *engine.Runner, mailStatus *mail.Status, width int) string {
+func renderOverview(s metrics.Snapshot, runner *engine.Runner, scenarioPath string, mailStatus *mail.Status, width int) string {
 	if runner != nil && runner.State() == engine.StateScriptError {
 		msg := runner.ScriptError()
 		if msg == "" {
@@ -32,7 +38,7 @@ func renderOverview(s metrics.Snapshot, runner *engine.Runner, mailStatus *mail.
 		return StyleErr.Render("SCRIPT ERROR — " + msg)
 	}
 
-	header := renderScenarioHeader(s, width)
+	header := renderScenarioHeader(s, scenarioPath, width)
 	counters := renderCounterRow(s)
 	throughput := renderThroughputRow(s)
 	percentiles := renderPercentiles(s)
@@ -128,26 +134,74 @@ func formatMailStatus(snap mail.Snapshot) string {
 	return ""
 }
 
-// renderScenarioHeader shows the full scenario name (bold), description, and
-// PROTOCOL label on separate lines.
-func renderScenarioHeader(s metrics.Snapshot, width int) string {
+// renderScenarioHeader renders three stacked lines:
+//
+//   - scenario name in accent colour, bold;
+//   - description in pure white (when present);
+//   - source file path in muted grey (when known).
+//
+// PROTOCOL used to live here as a fourth line — it now sits next to the
+// counter KPIs as a boxed value so users can compare it visually with
+// SENT / RECEIVED / ERRORS.
+func renderScenarioHeader(s metrics.Snapshot, scenarioPath string, width int) string {
 	name := lipgloss.NewStyle().Bold(true).Foreground(ColorAccent).Render(s.ScenarioName)
 	parts := []string{name}
 	if s.ScenarioDescription != "" {
-		parts = append(parts, StyleMuted.Render(s.ScenarioDescription))
+		desc := lipgloss.NewStyle().Foreground(ColorWhite).Render(s.ScenarioDescription)
+		parts = append(parts, desc)
 	}
-	if s.Protocol != "" {
-		parts = append(parts, StyleKpiLabel.Render("PROTOCOL")+"  "+s.Protocol)
+	if scenarioPath != "" {
+		// Manually hard-wrap long paths and re-apply the muted style to
+		// each visual line. The outer detail container does its own
+		// width-constrained wrap of the composed view, and that outer wrap
+		// would drop the inner ANSI style on wrapped continuation lines —
+		// they'd render in the terminal's default foreground (white).
+		// Splitting up front and styling each line independently avoids
+		// relying on the outer wrapper to carry foreground colour forward.
+		for _, line := range hardWrap(scenarioPath, width) {
+			parts = append(parts, StyleMuted.Render(line))
+		}
 	}
 	return strings.Join(parts, "\n")
 }
 
-// renderCounterRow renders the SENT / RECEIVED / ERRORS boxes.
+// hardWrap breaks s into chunks no wider than width runes. width <= 0
+// disables wrapping (the original string is returned unchanged). Used
+// for content with no natural break points (file paths) where word-wrap
+// would be a no-op.
+func hardWrap(s string, width int) []string {
+	if width <= 0 {
+		return []string{s}
+	}
+	runes := []rune(s)
+	if len(runes) <= width {
+		return []string{s}
+	}
+	out := make([]string, 0, (len(runes)+width-1)/width)
+	for i := 0; i < len(runes); i += width {
+		end := i + width
+		if end > len(runes) {
+			end = len(runes)
+		}
+		out = append(out, string(runes[i:end]))
+	}
+	return out
+}
+
+// renderCounterRow renders the SENT / RECEIVED / ERRORS / PROTOCOL boxes.
+// PROTOCOL shares the same boxed style as the counters so it reads as a
+// peer; when the transport hasn't reported a protocol yet the box shows
+// a muted dash.
 func renderCounterRow(s metrics.Snapshot) string {
+	proto := s.Protocol
+	if proto == "" {
+		proto = "—"
+	}
 	boxes := []string{
 		kpiBox("SENT", formatCount(s.Sent), lipgloss.NoColor{}),
 		kpiBox("RECEIVED", formatCount(s.Received), lipgloss.NoColor{}),
 		kpiBox("ERRORS", formatCount(s.Errors), maybeError(s.Errors)),
+		kpiBox("PROTOCOL", proto, lipgloss.NoColor{}),
 	}
 	return lipgloss.JoinHorizontal(lipgloss.Top, boxes...)
 }
