@@ -49,6 +49,7 @@
 12. [CSV Reports](#12-csv-reports)
 13. [Common Recipes](#13-common-recipes)
 14. [Troubleshooting](#14-troubleshooting)
+15. [Releasing](#15-releasing)
 
 ---
 
@@ -1688,3 +1689,145 @@ Your expression failed to compile. The Overview tab shows the exact
 error from expr-lang; common causes are an unbalanced `(`, a missing
 right-hand side after an operator, or referencing a function that
 doesn't exist in the built-ins table above.
+
+---
+
+## 15. Releasing
+
+Cross-platform binaries are produced by [GoReleaser](https://goreleaser.com)
+running in GitHub Actions. The whole pipeline is declarative: push a
+git tag matching `v*`, get a GitHub Release with six pre-built archives
+plus a SHA-256 checksums file. No manual builds, no manual uploads.
+
+### 15.1 Cutting a release
+
+From a clean `main` checkout:
+
+```bash
+git checkout main && git pull
+git tag -a v0.2.0 -m "0.2.0 — one-line summary"
+git push github v0.2.0
+```
+
+Pushing the tag fires `.github/workflows/release.yml`, which:
+
+1. Checks out at full depth (GoReleaser needs the tag history for the auto-generated changelog).
+2. Sets up Go from the version pinned in `go.mod`.
+3. Runs `goreleaser-action@v6` with `release --clean`.
+
+A typical run takes 3–5 minutes. When it finishes, the release appears
+under [Releases](https://github.com/wimheynderickx/livecharge-loadtest/releases)
+named after the tag.
+
+### 15.2 Build matrix
+
+Six combinations come out of one tag push:
+
+| OS | Arch | Archive |
+| --- | --- | --- |
+| Linux | amd64 | `loadtest_<version>_linux_amd64.tar.gz` |
+| Linux | arm64 | `loadtest_<version>_linux_arm64.tar.gz` |
+| macOS | amd64 (Intel) | `loadtest_<version>_darwin_amd64.tar.gz` |
+| macOS | arm64 (Apple Silicon) | `loadtest_<version>_darwin_arm64.tar.gz` |
+| Windows | amd64 | `loadtest_<version>_windows_amd64.zip` |
+| Windows | arm64 | `loadtest_<version>_windows_arm64.zip` |
+
+Each archive contains the `loadtest` binary (or `loadtest.exe` on
+Windows), `LICENSE`, `README.md`, and both manual documents
+(`manual.md`, `repository-layout.md`). Binaries are CGO-free and
+stripped (`-trimpath -s -w`); typical size is 18–20 MB.
+
+### 15.3 Version stamping
+
+GoReleaser injects the tag and short commit via `ldflags` into
+`cmd/loadtest/main.go`'s `version` and `commit` vars:
+
+```bash
+$ loadtest version
+loadtest 0.2.0 (commit 7f124f0)
+```
+
+The same pattern is used by `make build` for local dev builds, with
+`git describe --tags --always --dirty` producing strings like
+`v0.2.0-3-gabc1234-dirty`.
+
+### 15.4 Verifying downloads
+
+Every release ships a `loadtest_<version>_checksums.txt` next to the
+archives. Verify with:
+
+```bash
+sha256sum -c loadtest_0.2.0_checksums.txt --ignore-missing
+# or, on macOS:
+shasum -a 256 -c loadtest_0.2.0_checksums.txt --ignore-missing
+```
+
+A clean run prints `OK` next to every archive present in the current
+directory.
+
+### 15.5 Local dry-run before tagging
+
+GoReleaser can simulate a release locally without uploading anything.
+This is the recommended sanity check before the first real tag of a
+cycle, or after any non-trivial `.goreleaser.yml` change.
+
+```bash
+brew install goreleaser            # one-time install
+goreleaser release --snapshot --clean
+ls dist/                           # six archives + checksums + metadata
+```
+
+Artifacts land in `./dist/` instead of being uploaded. The version
+string carries a `-snapshot-<sha>` suffix so they can't be mistaken for
+real releases.
+
+### 15.6 Auto-generated changelog
+
+The release notes are built from PR merge commits between the new tag
+and the previous one. The config in `.goreleaser.yml` groups entries:
+
+- **Features** — commits matching `feat:` / `feat(scope):`.
+- **Bug fixes** — commits matching `fix:` / `fix(scope):`.
+- **Other** — everything else (except `docs:`, `test:`, `chore:`,
+  `style:`, `refactor:`, and merge commits, which are filtered out).
+
+Writing your commit subjects in conventional-commit style keeps the
+release notes self-curating. A line like `fix(transport): close
+http2.Transport idle conns on Close()` lands cleanly under **Bug fixes**.
+
+### 15.7 Caveats users should know
+
+The auto-generated release body mentions these for end-user
+convenience; document any platform-specific issue you hit there too:
+
+- **macOS Gatekeeper** — binaries are not signed with an Apple
+  Developer ID. First run prompts "unknown developer". Bypass with
+  `xattr -d com.apple.quarantine ./loadtest` after extracting the
+  archive.
+- **Windows TUI** — works in Windows Terminal and PowerShell 7. Older
+  `cmd.exe` cannot render the box-drawing characters; use `--no-tui`
+  there or upgrade to Windows Terminal.
+- **No native dependencies** — every binary is statically linked Go,
+  so glibc / Windows-runtime mismatches don't apply. The same archive
+  runs on Alpine, Ubuntu, Amazon Linux, etc.
+
+### 15.8 If a release fails halfway
+
+GoReleaser is idempotent at the tag level. If the workflow fails after
+uploading some archives:
+
+1. Delete the partial release via the GitHub UI (Releases → the tag → Delete).
+2. Delete the tag locally **and** on the remote:
+
+   ```bash
+   git tag -d v0.2.0
+   git push github :refs/tags/v0.2.0
+   ```
+
+3. Fix the cause (workflow log linked from the failed run).
+4. Re-tag with the same number and push again.
+
+Re-using a tag is the right move only when nothing landed in the wild
+yet. Once users have downloaded an archive with version `v0.2.0`, any
+further release MUST bump the tag (`v0.2.1` for a patch, `v0.3.0` for
+the next minor) — never silently replace the contents.
