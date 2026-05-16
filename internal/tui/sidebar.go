@@ -27,6 +27,25 @@ const linesPerSidebarRow = 5
 // totalsBlockLines is the number of lines the "─── totals ───" block uses.
 const totalsBlockLines = 6
 
+// totalsLabelPrefix is the "─── totals " marker that opens the divider.
+// totalsDivider extends it with trailing ─ runs so the line spans the
+// full sidebar content width and reads as a visual underline that runs
+// up to the column border.
+const totalsLabelPrefix = "─── totals "
+
+func totalsDivider() string {
+	// SidebarWidth includes left+right padding (1 each), so the usable
+	// content width is SidebarWidth - 2. Subtract the prefix runes to
+	// know how many trailing ─ to append. Guard against tiny widths so
+	// we never emit a divider shorter than the original 14-char one.
+	innerWidth := SidebarWidth - 2
+	trailing := innerWidth - len([]rune(totalsLabelPrefix))
+	if trailing < 3 {
+		trailing = 3
+	}
+	return totalsLabelPrefix + strings.Repeat("─", trailing)
+}
+
 func renderSidebar(snaps []metrics.Snapshot, selected int, height int) string {
 	if len(snaps) == 0 {
 		return StyleSidebar.Copy().Height(height).Render("(no scenarios)")
@@ -81,7 +100,7 @@ func renderSidebar(snaps []metrics.Snapshot, selected int, height int) string {
 	}
 	y := lipgloss.NewStyle().Foreground(ColorLatencyValue)
 	rows = append(rows,
-		StyleMuted.Render("─── totals ───"),
+		StyleMuted.Render(totalsDivider()),
 		fmt.Sprintf("sent   %s", y.Render(formatCount(sent))),
 		fmt.Sprintf("rate   %s/s", y.Render(fmt.Sprintf("%.1f", rate))),
 		fmt.Sprintf("max/s  %s", y.Render(fmt.Sprintf("%.1f", maxRate))),

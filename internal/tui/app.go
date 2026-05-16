@@ -295,6 +295,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "4":
 		m.activeTab = TabLog
 
+	// Left / right cycle tabs. Documented in the operational manual; not
+	// surfaced in the footer hint so the bar stays uncluttered.
+	case "left":
+		m.activeTab = (m.activeTab - 1 + tabCount) % tabCount
+	case "right":
+		m.activeTab = (m.activeTab + 1) % tabCount
+
 	case "s":
 		r := m.runners[m.selected]
 		if r.State() == engine.StateRunning {
@@ -523,16 +530,18 @@ func (m Model) View() string {
 	var logBuf *LogBuffer
 	var runner *engine.Runner
 	var mailStatus *mail.Status
+	var scenarioPath string
 	if m.selected < len(m.snapshots) {
 		snap = m.snapshots[m.selected]
 		logBuf = &m.logBufs[m.selected]
 		runner = m.runners[m.selected]
+		scenarioPath = m.runnerPaths[runner]
 		if m.mailStatuses != nil {
 			mailStatus = m.mailStatuses.StatusFor(runner)
 		}
 	}
 	detail := StyleDetail.Copy().Width(detailWidth).Height(contentHeight).Render(
-		renderDetail(m.activeTab, snap, runner, logBuf, mailStatus, detailWidth-2, contentHeight),
+		renderDetail(m.activeTab, snap, runner, scenarioPath, logBuf, mailStatus, detailWidth-2, contentHeight),
 	)
 
 	main := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, detail)

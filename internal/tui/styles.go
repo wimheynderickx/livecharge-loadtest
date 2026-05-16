@@ -17,6 +17,7 @@ var (
 	ColorMuted        = lipgloss.Color("#6B7280")
 	ColorBorder       = lipgloss.Color("#374151")
 	ColorOK           = lipgloss.Color("#34D399")
+	ColorWhite        = lipgloss.Color("#FFFFFF") // pure white, e.g. scenario description
 	ColorLatencyValue = lipgloss.Color("#FBBF24") // bright amber-yellow for numeric latency
 
 	// Branding bar colours used by the top and bottom strips.
