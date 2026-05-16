@@ -28,7 +28,7 @@ Check out https://channel.tech/ for more information about their product portfol
 - **CSV export** with float-ms latency columns, predicate counts, and `{timestamp}` placeholders.
 - **Suite runs** — execute multiple scenarios concurrently from a single suite file.
 - **Built-in mock server** (NATS + HTTP / HTTPS / HTTP/2) with configurable `fail_rate`, `no_answer_rate`, chunked streaming, and auto-generated self-signed TLS certs.
-- **Post-run email notifications** over SMTP (STARTTLS + auth) with text, HTML, or `multipart/alternative` body, log attachments, and templated subject/body.
+- **Email notifications** on any combination of lifecycle events — `start`, `progress` (at a configurable cadence), `done`, and `error` — sent over SMTP (STARTTLS + auth) with text, HTML, or `multipart/alternative` body, log attachments, and templated subject/body.
 - **Headless / CI mode** with structured logs and proper exit codes.
 - **Embedded operational manual** — view it from inside the TUI (`m`) or via `loadtest manual`.
 
