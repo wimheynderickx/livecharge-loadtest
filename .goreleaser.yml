@@ -1,0 +1,108 @@
+# GoReleaser config. Triggered by .github/workflows/release.yml when a
+# tag matching `v*` is pushed. Produces six per-platform archives plus a
+# SHA-256 checksums file, all attached to the GitHub Release named after
+# the tag.
+#
+# Local smoke test (no push, no upload):
+#   goreleaser release --snapshot --clean
+#
+# The resulting artifacts land in ./dist/.
+version: 2
+
+project_name: loadtest
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - id: loadtest
+    main: ./cmd/loadtest
+    binary: loadtest
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.ShortCommit}}
+
+archives:
+  - id: default
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - LICENSE
+      - README.md
+      - internal/manual/manual.md
+      - internal/manual/repository-layout.md
+
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ .Version }}-snapshot-{{ .ShortCommit }}"
+
+release:
+  draft: false
+  prerelease: auto
+  name_template: "{{ .ProjectName }} {{ .Version }}"
+  header: |
+    ## {{ .ProjectName }} {{ .Tag }}
+
+    Cross-platform binaries for Linux, macOS, and Windows (amd64 + arm64).
+
+    **Quick install:**
+
+    ```bash
+    # Linux/macOS — pick the matching archive, extract, drop on PATH.
+    tar -xzf loadtest_{{ .Version }}_<os>_<arch>.tar.gz
+    sudo mv loadtest /usr/local/bin/
+    loadtest version
+    ```
+
+    **Verifying downloads** — see `{{ .ProjectName }}_{{ .Version }}_checksums.txt`.
+
+    **TUI on Windows:** runs in Windows Terminal / PowerShell 7. Older
+    `cmd.exe` does not render the box-drawing characters cleanly — use
+    `--no-tui` if you must run it there.
+
+    **macOS Gatekeeper:** binaries are not signed. Run once with
+    `xattr -d com.apple.quarantine ./loadtest` after extracting to bypass
+    the "unknown developer" prompt.
+
+changelog:
+  use: github
+  sort: asc
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: Bug fixes
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: Other
+      order: 999
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^style:"
+      - "^refactor:"
+      - "Merge pull request"
+      - "Merge branch"
