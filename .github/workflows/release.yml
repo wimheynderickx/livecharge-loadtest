@@ -1,0 +1,44 @@
+# Release pipeline. Fires when a tag matching `v*` is pushed.
+#
+# Cut a release with:
+#   git tag -a v0.2.0 -m "0.2.0 — slice A/B/C wrap-up"
+#   git push github v0.2.0
+#
+# GitHub Actions then runs GoReleaser, which builds six per-platform
+# archives + a SHA-256 checksums file and attaches them to the release
+# named after the tag. See .goreleaser.yml for the build matrix.
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # required for goreleaser-action to upload release assets
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # fetch-depth: 0 gives GoReleaser the full tag history it needs
+          # to compute the auto-changelog between this tag and the previous.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
